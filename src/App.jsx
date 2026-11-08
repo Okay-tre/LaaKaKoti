@@ -317,7 +317,6 @@ morningTasks.forEach(async (task) => {
     const compDateStr = new Date(task.completedAt).toISOString().split('T')[0];
     if (compDateStr < todayStr) {
       try {
-        // Reset task to uncompleted for the new morning
         await updateDoc(doc(db, 'tasks', task.id), {
           completed: false,
           completedAt: null
@@ -490,8 +489,7 @@ if (!suggestions || suggestions.length === 0) return null;
 return (
 
 
- Frequent:
-
+Frequent:
 {suggestions.map((item, idx) => (
 <button
 key={idx}
@@ -898,10 +896,7 @@ return (
 
 
 
-
-
 Upcoming Shared Timeline
-
 Chronological list of scheduled tasks & deadlines
 
 
@@ -1102,14 +1097,15 @@ placeholder="e.g. Milk, Bananas..."
 className="flex-1 min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
 />
 
-<select
-value={selectedStore}
-onChange={(e) => setSelectedStore(e.target.value)}
-className="min-h-[44px] px-3 bg-gray-50 border border-gray-300 font-black text-sm text-[#1F2937]"
->
-Prisma
-Lidl
-
+        <div className="flex gap-2">
+          <select
+            value={selectedStore}
+            onChange={(e) => setSelectedStore(e.target.value)}
+            className="min-h-[44px] px-3 bg-gray-50 border border-gray-300 font-black text-sm text-[#1F2937]"
+          >
+            <option value="Prisma">Prisma</option>
+            <option value="Lidl">Lidl</option>
+          </select>
 
           <div className="flex items-center bg-gray-50 border border-gray-300">
             <button type="button" onClick={() => setQuantity(prev => Math.max(1, prev - 1))} className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]">-</button>
@@ -1268,11 +1264,12 @@ placeholder="e.g. Batteries, Lightbulbs..."
 className="flex-1 min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
 />
 
-
-<button type="button" onClick={() => setQuantity(prev => Math.max(1, prev - 1))} className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]">-
-{quantity}
-<button type="button" onClick={() => setQuantity(prev => prev + 1)} className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]">+
-
+        <div className="flex gap-2">
+          <div className="flex items-center bg-gray-50 border border-gray-300">
+            <button type="button" onClick={() => setQuantity(prev => Math.max(1, prev - 1))} className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]">-</button>
+            <span className="px-2 font-black text-sm text-[#1F2937]">{quantity}</span>
+            <button type="button" onClick={() => setQuantity(prev => prev + 1)} className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]">+</button>
+          </div>
 
           <button
             type="button"
