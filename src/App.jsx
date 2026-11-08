@@ -54,14 +54,12 @@ const db = getFirestore(app);
 const PRIMARY_ADMIN_EMAIL = 'patteri6907@gmail.com';
 const ROOM_SECTIONS = ['Kitchen', 'Living room', 'Kids room', 'Bathroom', 'Parents room'];
 
-// Helper to extract author initial (e.g. 'O' for Otto, 'J' for Johanna)
 function getAuthorInitial(user) {
 if (!user) return '?';
 const name = user.displayName || user.email || '';
 return name.trim().charAt(0).toUpperCase() || '?';
 }
 
-// Hook to compute quick-add suggestions from history
 function useFrequentSuggestions(items, currentInput, minOccurrences = 1) {
 return useMemo(() => {
 const counts = {};
@@ -297,7 +295,6 @@ className={min-h-[44px] flex-1 flex flex-col items-center justify-center py-1 tr
 );
 }
 
-// PART 1: Morning To-Do List View with Auto Reset
 function MorningToDoView({ user, tasks }) {
 const [newTitle, setNewTitle] = useState('');
 const [dueDate, setDueDate] = useState('');
@@ -307,7 +304,6 @@ const [showPhotoInput, setShowPhotoInput] = useState(false);
 
 const morningTasks = useMemo(() => tasks.filter(t => t.scope === 'morning'), [tasks]);
 
-// Check and perform Daily Reset logic for completed morning tasks older than today
 useEffect(() => {
 if (!autoReset) return;
 
@@ -334,7 +330,6 @@ morningTasks.forEach(async (task) => {
 const activeTasks = useMemo(() => morningTasks.filter(t => !t.completed), [morningTasks]);
 const completedTasks = useMemo(() => morningTasks.filter(t => t.completed), [morningTasks]);
 
-// Smart suggestions from morning tasks history
 const suggestions = useFrequentSuggestions(morningTasks, newTitle);
 
 const handleQuickAdd = async (e) => {
@@ -447,7 +442,6 @@ Auto-reset daily
       )}
     </form>
 
-    {/* PART 2: Smart Quick-Add Pills */}
     <SmartPills suggestions={suggestions} onSelect={(title) => setNewTitle(title)} />
   </div>
 
@@ -482,7 +476,6 @@ Auto-reset daily
 );
 }
 
-// PART 2: Smart Pills Component for horizontal quick recommendations
 function SmartPills({ suggestions, onSelect }) {
 if (!suggestions || suggestions.length === 0) return null;
 
@@ -865,7 +858,6 @@ Otto
 );
 }
 
-// PART 3: Upcoming Shared Calendar Feed View
 function UpcomingFeedView({ tasks }) {
 const upcomingTasks = useMemo(() => {
 return tasks
@@ -919,13 +911,11 @@ Chronological list of scheduled tasks & deadlines
 
           return (
             <div key={task.id} className="relative pl-6">
-              {/* Timeline node */}
               <div className={`absolute -left-[9px] top-1 w-4 h-4 rounded-full border-2 border-white ${isOverdue ? 'bg-red-500' : 'bg-[#D946EF]'}`} />
 
               <div className="bg-gray-50 border border-gray-200 p-3 space-y-1">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
-                    {/* Author Badge */}
                     <AuthorBadge author={task.author || task.owner?.charAt(0) || 'H'} />
                     <span className="font-black text-sm text-[#1F2937]">{task.title}</span>
                   </div>
@@ -960,7 +950,6 @@ Chronological list of scheduled tasks & deadlines
 );
 }
 
-// Author Badge Component
 function AuthorBadge({ author }) {
 return (
 
