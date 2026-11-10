@@ -142,7 +142,6 @@ export default function App() {
     );
   }, [user, userEmail, allowedUsers, isAdmin]);
 
-  // Protected subscriptions start only after access is granted.
   useEffect(() => {
     setTasks([]);
     setShoppingItems([]);
@@ -1165,6 +1164,14 @@ function PersonalToDoView({
   );
 }
 
+function getLocalDateKey(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+
+  return `${year}-${month}-${day}`;
+}
+
 function CalendarView({ user, tasks }) {
   const [newTitle, setNewTitle] = useState('');
   const [eventDate, setEventDate] = useState('');
@@ -1172,32 +1179,105 @@ function CalendarView({ user, tasks }) {
   const [deletingId, setDeletingId] = useState(null);
   const [error, setError] = useState('');
 
-  // Keep older dated tasks visible without adding dates to new to-dos.
+  const [showPastEvents, setShowPastEvents] = useState(false);
+  const [todayKey, setTodayKey] = useState(() =>
+    getLocalDateKey(new Date())
+  );
+
+  // Refresh the date at local midnight and when returning to the tab.
+  useEffect(() => {
+    let timeoutId;
+
+    const refreshDate = () => {
+      const now = new Date();
+
+      setTodayKey(getLocalDateKey(now));
+
+      const nextMidnight = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + 1
+      );
+
+      window.clearTimeout(timeoutId);
+
+      timeoutId = window.setTimeout(
+        refreshDate,
+        nextMidnight.getTime() - now.getTime() + 100
+      );
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshDate();
+      }
+    };
+
+    refreshDate();
+
+    window.addEventListener('focus', refreshDate);
+    document.addEventListener(
+      'visibilitychange',
+      handleVisibilityChange
+    );
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      window.removeEventListener('focus', refreshDate);
+      document.removeEventListener(
+        'visibilitychange',
+        handleVisibilityChange
+      );
+    };
+  }, []);
+
+  // One rolling calendar month, including shorter-month handling.
+  // For example, March 31 goes back to February 28 or 29.
+  const pastMonthStart = useMemo(() => {
+    const [year, month, day] = todayKey.split('-').map(Number);
+
+    const lastDayOfPreviousMonth = new Date(
+      year,
+      month - 1,
+      0
+    ).getDate();
+
+    return getLocalDateKey(
+      new Date(
+        year,
+        month - 2,
+        Math.min(day, lastDayOfPreviousMonth)
+      )
+    );
+  }, [todayKey]);
+
   const calendarItems = useMemo(() => {
+    const firstVisibleDate = showPastEvents
+      ? pastMonthStart
+      : todayKey;
+
     return tasks
       .filter(
         item =>
           !item.completed &&
           typeof item.dueDate === 'string' &&
-          item.dueDate
+          /^\d{4}-\d{2}-\d{2}$/.test(item.dueDate) &&
+          item.dueDate >= firstVisibleDate
       )
       .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
-  }, [tasks]);
+  }, [tasks, showPastEvents, todayKey, pastMonthStart]);
 
   const getRelativeDayLabel = value => {
     const [year, month, day] = value.split('-').map(Number);
     if (!year || !month || !day) return value;
 
-    const today = new Date();
+    const [todayYear, todayMonth, todayDay] =
+      todayKey.split('-').map(Number);
 
     const difference = Math.round(
       (
         Date.UTC(year, month - 1, day) -
-        Date.UTC(
-          today.getFullYear(),
-          today.getMonth(),
-          today.getDate()
-        )
+        Date.UTC(todayYear, todayMonth - 1, todayDay)
       ) / 86400000
     );
 
@@ -1283,7 +1363,7 @@ function CalendarView({ user, tasks }) {
         </div>
 
         <span className="shrink-0 text-xs font-black bg-fuchsia-100 text-fuchsia-800 px-2 py-1">
-          {calendarItems.length} scheduled
+          {calendarItems.length} shown
         </span>
       </div>
 
@@ -1342,16 +1422,36 @@ function CalendarView({ user, tasks }) {
         </p>
       )}
 
+      <div className="bg-white p-4 border border-gray-200 space-y-2">
+        <label className="flex items-center gap-2 text-sm font-bold cursor-pointer">
+          <input
+            type="checkbox"
+            checked={showPastEvents}
+            onChange={e => setShowPastEvents(e.target.checked)}
+            className="w-4 h-4 accent-fuchsia-600"
+          />
+          Show past events
+        </label>
+
+        <p className="text-xs text-gray-500">
+          {showPastEvents
+            ? `Showing today and future events, plus past events from ${pastMonthStart} through yesterday.`
+            : 'Showing today and future events. Turn this on to also see the past month.'}
+        </p>
+      </div>
+
       {calendarItems.length === 0 ? (
         <div className="bg-white p-8 text-center border border-gray-200">
           <Calendar className="w-10 h-10 text-gray-300 mx-auto mb-2" />
 
           <p className="text-sm font-bold text-gray-500">
-            No events yet.
+            {showPastEvents
+              ? 'No events in this date range.'
+              : 'No upcoming events.'}
           </p>
 
           <p className="text-xs text-gray-400 mt-1">
-            Add your first event using the form above.
+            Add an event using the form above.
           </p>
         </div>
       ) : (
@@ -1382,7 +1482,15 @@ function CalendarView({ user, tasks }) {
                     {item.dueDate}
                   </time>
 
-                  <span>{getRelativeDayLabel(item.dueDate)}</span>
+                  <span
+                    className={
+                      item.dueDate < todayKey
+                        ? 'text-gray-500'
+                        : 'text-fuchsia-700 font-semibold'
+                    }
+                  >
+                    {getRelativeDayLabel(item.dueDate)}
+                  </span>
 
                   <span className="px-1.5 py-0.5 bg-fuchsia-100 text-fuchsia-800 uppercase text-[10px] font-black">
                     {item.scope === 'calendar'
@@ -1669,6 +1777,7 @@ function GroceryShoppingView({ items }) {
           );
 
           const activeItems = storeItems.filter(item => !item.completed);
+
           const completedStoreItems = storeItems.filter(
             item => item.completed
           );
