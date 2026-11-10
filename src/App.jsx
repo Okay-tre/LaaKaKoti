@@ -34,8 +34,7 @@ import {
   UserCheck,
   Calendar,
   Image as ImageIcon,
-  Sun,
-  Clock
+  Sun
 } from 'lucide-react';
 
 const firebaseConfig = {
@@ -52,6 +51,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 const PRIMARY_ADMIN_EMAIL = 'patteri6907@gmail.com';
+
 const ROOM_SECTIONS = [
   'Kitchen',
   'Living room',
@@ -62,6 +62,7 @@ const ROOM_SECTIONS = [
 
 function getAuthorInitial(user) {
   if (!user) return '?';
+
   const name = user.displayName || user.email || '';
   return name.trim().charAt(0).toUpperCase() || '?';
 }
@@ -72,14 +73,16 @@ function useFrequentSuggestions(items, currentInput, minOccurrences = 1) {
 
     items.forEach(item => {
       if (!item.title) return;
+
       const cleanTitle = item.title.trim();
       counts[cleanTitle] = (counts[cleanTitle] || 0) + 1;
     });
 
     return Object.entries(counts)
-      .filter(([title, count]) =>
-        count >= minOccurrences &&
-        title.toLowerCase().includes(currentInput.toLowerCase())
+      .filter(
+        ([title, count]) =>
+          count >= minOccurrences &&
+          title.toLowerCase().includes(currentInput.toLowerCase())
       )
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8)
@@ -98,8 +101,8 @@ export default function App() {
   const [shoppingItems, setShoppingItems] = useState([]);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, u => {
-      setUser(u);
+    const unsubscribe = onAuthStateChanged(auth, currentUser => {
+      setUser(currentUser);
       setAuthLoading(false);
     });
 
@@ -114,7 +117,10 @@ export default function App() {
       collection(db, 'allowed_users'),
       snapshot => {
         setAllowedUsers(
-          snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
+          snapshot.docs.map(document => ({
+            id: document.id,
+            ...document.data()
+          }))
         );
       },
       err => console.error('Allowed users error:', err)
@@ -122,6 +128,7 @@ export default function App() {
   }, [user]);
 
   const userEmail = user?.email || '';
+
   const isAdmin =
     userEmail.toLowerCase() === PRIMARY_ADMIN_EMAIL.toLowerCase();
 
@@ -130,12 +137,12 @@ export default function App() {
     if (isAdmin) return true;
 
     return allowedUsers.some(
-      u => u.email?.toLowerCase() === userEmail.toLowerCase()
+      allowedUser =>
+        allowedUser.email?.toLowerCase() === userEmail.toLowerCase()
     );
   }, [user, userEmail, allowedUsers, isAdmin]);
 
-  // Start protected listeners only after access is granted.
-  // Restart them when the administrator approves the current user.
+  // Protected subscriptions start only after access is granted.
   useEffect(() => {
     setTasks([]);
     setShoppingItems([]);
@@ -146,7 +153,10 @@ export default function App() {
       collection(db, 'tasks'),
       snapshot => {
         setTasks(
-          snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
+          snapshot.docs.map(document => ({
+            id: document.id,
+            ...document.data()
+          }))
         );
       },
       err => console.error('Tasks error:', err)
@@ -156,7 +166,10 @@ export default function App() {
       collection(db, 'shopping_items'),
       snapshot => {
         setShoppingItems(
-          snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
+          snapshot.docs.map(document => ({
+            id: document.id,
+            ...document.data()
+          }))
         );
       },
       err => console.error('Shopping error:', err)
@@ -247,7 +260,9 @@ export default function App() {
 
           <div className="p-4 bg-[#FEE2E2] text-sm text-[#1F2937] text-left mb-6 font-medium">
             Please contact the administrator (
-            <strong className="text-[#EF4444]">{PRIMARY_ADMIN_EMAIL}</strong>
+            <strong className="text-[#EF4444]">
+              {PRIMARY_ADMIN_EMAIL}
+            </strong>
             ) to authorize access.
           </div>
 
@@ -307,32 +322,38 @@ export default function App() {
               label="Morning"
               icon={<Sun className="w-3.5 h-3.5 inline mr-1" />}
             />
+
             <HeaderTabButton
               active={activeTab === 'household'}
               onClick={() => setActiveTab('household')}
               label="Household To-Do"
             />
+
             <HeaderTabButton
               active={activeTab === 'personal'}
               onClick={() => setActiveTab('personal')}
               label="Personal To-Do"
             />
+
             <HeaderTabButton
-              active={activeTab === 'upcoming'}
-              onClick={() => setActiveTab('upcoming')}
-              label="Upcoming Feed"
-              icon={<Clock className="w-3.5 h-3.5 inline mr-1" />}
+              active={activeTab === 'calendar'}
+              onClick={() => setActiveTab('calendar')}
+              label="Calendar"
+              icon={<Calendar className="w-3.5 h-3.5 inline mr-1" />}
             />
+
             <HeaderTabButton
               active={activeTab === 'grocery'}
               onClick={() => setActiveTab('grocery')}
               label="Grocery List"
             />
+
             <HeaderTabButton
               active={activeTab === 'other'}
               onClick={() => setActiveTab('other')}
               label="Other Shopping"
             />
+
             {isAdmin && (
               <HeaderTabButton
                 active={activeTab === 'admin'}
@@ -348,9 +369,11 @@ export default function App() {
         {activeTab === 'morning' && (
           <MorningToDoView user={user} tasks={tasks} />
         )}
+
         {activeTab === 'household' && (
           <HouseholdToDoView user={user} tasks={tasks} />
         )}
+
         {activeTab === 'personal' && (
           <PersonalToDoView
             user={user}
@@ -359,15 +382,19 @@ export default function App() {
             tasks={tasks}
           />
         )}
-        {activeTab === 'upcoming' && (
-          <UpcomingFeedView tasks={tasks} />
+
+        {activeTab === 'calendar' && (
+          <CalendarView user={user} tasks={tasks} />
         )}
+
         {activeTab === 'grocery' && (
           <GroceryShoppingView items={shoppingItems} />
         )}
+
         {activeTab === 'other' && (
           <OtherShoppingView items={shoppingItems} />
         )}
+
         {activeTab === 'admin' && isAdmin && (
           <AdminPanelView allowedUsers={allowedUsers} />
         )}
@@ -380,36 +407,42 @@ export default function App() {
           icon={<Sun className="w-5 h-5" />}
           label="Morning"
         />
+
         <MobileNavButton
           active={activeTab === 'household'}
           onClick={() => setActiveTab('household')}
           icon={<Home className="w-5 h-5" />}
           label="Household"
         />
+
         <MobileNavButton
           active={activeTab === 'personal'}
           onClick={() => setActiveTab('personal')}
           icon={<User className="w-5 h-5" />}
           label="Personal"
         />
+
         <MobileNavButton
-          active={activeTab === 'upcoming'}
-          onClick={() => setActiveTab('upcoming')}
-          icon={<Clock className="w-5 h-5" />}
-          label="Upcoming"
+          active={activeTab === 'calendar'}
+          onClick={() => setActiveTab('calendar')}
+          icon={<Calendar className="w-5 h-5" />}
+          label="Calendar"
         />
+
         <MobileNavButton
           active={activeTab === 'grocery'}
           onClick={() => setActiveTab('grocery')}
           icon={<ShoppingCart className="w-5 h-5" />}
           label="Grocery"
         />
+
         <MobileNavButton
           active={activeTab === 'other'}
           onClick={() => setActiveTab('other')}
           icon={<ImageIcon className="w-5 h-5" />}
           label="Other"
         />
+
         {isAdmin && (
           <MobileNavButton
             active={activeTab === 'admin'}
@@ -457,13 +490,12 @@ function MobileNavButton({ active, onClick, icon, label }) {
 
 function MorningToDoView({ user, tasks }) {
   const [newTitle, setNewTitle] = useState('');
-  const [dueDate, setDueDate] = useState('');
   const [autoReset, setAutoReset] = useState(true);
   const [photoUrl, setPhotoUrl] = useState('');
   const [showPhotoInput, setShowPhotoInput] = useState(false);
 
   const morningTasks = useMemo(
-    () => tasks.filter(t => t.scope === 'morning'),
+    () => tasks.filter(task => task.scope === 'morning'),
     [tasks]
   );
 
@@ -483,8 +515,8 @@ function MorningToDoView({ user, tasks }) {
               completed: false,
               completedAt: null
             });
-          } catch (e) {
-            console.error('Auto reset morning task error:', e);
+          } catch (err) {
+            console.error('Auto reset morning task error:', err);
           }
         }
       }
@@ -492,12 +524,12 @@ function MorningToDoView({ user, tasks }) {
   }, [morningTasks, autoReset]);
 
   const activeTasks = useMemo(
-    () => morningTasks.filter(t => !t.completed),
+    () => morningTasks.filter(task => !task.completed),
     [morningTasks]
   );
 
   const completedTasks = useMemo(
-    () => morningTasks.filter(t => t.completed),
+    () => morningTasks.filter(task => task.completed),
     [morningTasks]
   );
 
@@ -513,7 +545,6 @@ function MorningToDoView({ user, tasks }) {
         owner: null,
         author: getAuthorInitial(user),
         title: newTitle.trim(),
-        dueDate: dueDate || null,
         completed: false,
         imageUrl: photoUrl.trim() || null,
         createdAt: serverTimestamp(),
@@ -521,7 +552,6 @@ function MorningToDoView({ user, tasks }) {
       });
 
       setNewTitle('');
-      setDueDate('');
       setPhotoUrl('');
       setShowPhotoInput(false);
     } catch (err) {
@@ -576,13 +606,6 @@ function MorningToDoView({ user, tasks }) {
               onChange={e => setNewTitle(e.target.value)}
               placeholder="Add morning task..."
               className="flex-1 min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
-            />
-
-            <input
-              type="date"
-              value={dueDate}
-              onChange={e => setDueDate(e.target.value)}
-              className="min-h-[44px] px-2 bg-gray-50 border border-gray-300 font-bold text-xs text-[#1F2937]"
             />
 
             <div className="flex gap-2">
@@ -699,35 +722,35 @@ function SmartPills({ suggestions, onSelect }) {
 function HouseholdToDoView({ user, tasks }) {
   const [newTitle, setNewTitle] = useState('');
   const [selectedSection, setSelectedSection] = useState('Kitchen');
-  const [dueDate, setDueDate] = useState('');
   const [photoUrl, setPhotoUrl] = useState('');
   const [showPhotoInput, setShowPhotoInput] = useState(false);
   const [monthsToShow, setMonthsToShow] = useState(1);
   const [isCompletedOpen, setIsCompletedOpen] = useState(false);
 
   const householdTasks = useMemo(
-    () => tasks.filter(t => t.scope === 'household'),
+    () => tasks.filter(task => task.scope === 'household'),
     [tasks]
   );
 
   const activeTasks = useMemo(
-    () => householdTasks.filter(t => !t.completed),
+    () => householdTasks.filter(task => !task.completed),
     [householdTasks]
   );
 
   const suggestions = useFrequentSuggestions(householdTasks, newTitle);
 
   const completedTasks = useMemo(() => {
-    const list = householdTasks.filter(t => t.completed);
+    const list = householdTasks.filter(task => task.completed);
     const cutoffDate = new Date();
+
     cutoffDate.setMonth(cutoffDate.getMonth() - monthsToShow);
 
-    return list.filter(t => {
-      if (!t.completedAt) return true;
+    return list.filter(task => {
+      if (!task.completedAt) return true;
 
-      const compDate = t.completedAt.seconds
-        ? new Date(t.completedAt.seconds * 1000)
-        : new Date(t.completedAt);
+      const compDate = task.completedAt.seconds
+        ? new Date(task.completedAt.seconds * 1000)
+        : new Date(task.completedAt);
 
       return compDate >= cutoffDate;
     });
@@ -744,7 +767,6 @@ function HouseholdToDoView({ user, tasks }) {
         author: getAuthorInitial(user),
         title: newTitle.trim(),
         section: selectedSection,
-        dueDate: dueDate || null,
         completed: false,
         imageUrl: photoUrl.trim() || null,
         createdAt: serverTimestamp(),
@@ -752,7 +774,6 @@ function HouseholdToDoView({ user, tasks }) {
       });
 
       setNewTitle('');
-      setDueDate('');
       setPhotoUrl('');
       setShowPhotoInput(false);
     } catch (err) {
@@ -804,13 +825,6 @@ function HouseholdToDoView({ user, tasks }) {
               ))}
             </select>
 
-            <input
-              type="date"
-              value={dueDate}
-              onChange={e => setDueDate(e.target.value)}
-              className="min-h-[44px] px-2 bg-gray-50 border border-gray-300 font-bold text-xs text-[#1F2937]"
-            />
-
             <button
               type="button"
               onClick={() => setShowPhotoInput(!showPhotoInput)}
@@ -853,7 +867,9 @@ function HouseholdToDoView({ user, tasks }) {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {ROOM_SECTIONS.map(room => {
-          const roomTasks = activeTasks.filter(t => t.section === room);
+          const roomTasks = activeTasks.filter(
+            task => task.section === room
+          );
 
           return (
             <div
@@ -864,6 +880,7 @@ function HouseholdToDoView({ user, tasks }) {
                 <h3 className="text-sm font-black text-[#1F2937] uppercase tracking-wider">
                   {room}
                 </h3>
+
                 <span className="bg-[#D946EF] text-white text-[10px] font-black px-2 py-0.5">
                   {roomTasks.length}
                 </span>
@@ -898,6 +915,7 @@ function HouseholdToDoView({ user, tasks }) {
         >
           <div className="flex items-center gap-2">
             <Check className="w-5 h-5 text-emerald-600" />
+
             <span className="font-black text-[#1F2937] text-xs uppercase tracking-wider">
               Completed Tasks ({completedTasks.length})
             </span>
@@ -941,7 +959,9 @@ function HouseholdToDoView({ user, tasks }) {
               <div className="pt-2 border-t border-gray-100 flex justify-center">
                 <button
                   onClick={() =>
-                    setMonthsToShow(prev => Math.min(prev + 1, 12))
+                    setMonthsToShow(previous =>
+                      Math.min(previous + 1, 12)
+                    )
                   }
                   className="min-h-[40px] px-4 bg-[#D946EF] hover:bg-[#C026D3] text-white font-extrabold uppercase text-xs flex items-center gap-2"
                 >
@@ -964,24 +984,26 @@ function PersonalToDoView({
   tasks
 }) {
   const [newTitle, setNewTitle] = useState('');
-  const [dueDate, setDueDate] = useState('');
   const [photoUrl, setPhotoUrl] = useState('');
   const [showPhotoInput, setShowPhotoInput] = useState(false);
 
   const personalTasks = useMemo(
-    () => tasks.filter(
-      t => t.scope === 'personal' && t.owner === personalOwner
-    ),
+    () =>
+      tasks.filter(
+        task =>
+          task.scope === 'personal' &&
+          task.owner === personalOwner
+      ),
     [tasks, personalOwner]
   );
 
   const activeTasks = useMemo(
-    () => personalTasks.filter(t => !t.completed),
+    () => personalTasks.filter(task => !task.completed),
     [personalTasks]
   );
 
   const completedTasks = useMemo(
-    () => personalTasks.filter(t => t.completed),
+    () => personalTasks.filter(task => task.completed),
     [personalTasks]
   );
 
@@ -996,7 +1018,6 @@ function PersonalToDoView({
         author: getAuthorInitial(user),
         title: newTitle.trim(),
         section: null,
-        dueDate: dueDate || null,
         completed: false,
         imageUrl: photoUrl.trim() || null,
         createdAt: serverTimestamp(),
@@ -1004,7 +1025,6 @@ function PersonalToDoView({
       });
 
       setNewTitle('');
-      setDueDate('');
       setPhotoUrl('');
       setShowPhotoInput(false);
     } catch (err) {
@@ -1060,13 +1080,6 @@ function PersonalToDoView({
               onChange={e => setNewTitle(e.target.value)}
               placeholder={`Add personal task for ${personalOwner}...`}
               className="flex-1 min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
-            />
-
-            <input
-              type="date"
-              value={dueDate}
-              onChange={e => setDueDate(e.target.value)}
-              className="min-h-[44px] px-2 bg-gray-50 border border-gray-300 font-bold text-xs text-[#1F2937]"
             />
 
             <div className="flex gap-2">
@@ -1152,122 +1165,251 @@ function PersonalToDoView({
   );
 }
 
-function UpcomingFeedView({ tasks }) {
-  const upcomingTasks = useMemo(() => {
+function CalendarView({ user, tasks }) {
+  const [newTitle, setNewTitle] = useState('');
+  const [eventDate, setEventDate] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const [error, setError] = useState('');
+
+  // Keep older dated tasks visible without adding dates to new to-dos.
+  const calendarItems = useMemo(() => {
     return tasks
-      .filter(t => !t.completed && t.dueDate)
-      .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+      .filter(
+        item =>
+          !item.completed &&
+          typeof item.dueDate === 'string' &&
+          item.dueDate
+      )
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   }, [tasks]);
 
-  const getRelativeDayLabel = dueDateStr => {
-    if (!dueDateStr) return '';
+  const getRelativeDayLabel = value => {
+    const [year, month, day] = value.split('-').map(Number);
+    if (!year || !month || !day) return value;
 
     const today = new Date();
-    today.setHours(0, 0, 0, 0);
 
-    const target = new Date(dueDateStr);
-    target.setHours(0, 0, 0, 0);
-
-    const diffDays = Math.round(
-      (target - today) / (1000 * 60 * 60 * 24)
+    const difference = Math.round(
+      (
+        Date.UTC(year, month - 1, day) -
+        Date.UTC(
+          today.getFullYear(),
+          today.getMonth(),
+          today.getDate()
+        )
+      ) / 86400000
     );
 
-    if (diffDays === 0) return 'Today';
-    if (diffDays === 1) return 'Tomorrow';
-    if (diffDays > 1) return `In ${diffDays} days`;
-    if (diffDays < 0) return `${Math.abs(diffDays)} days overdue`;
+    if (difference === 0) return 'Today';
+    if (difference === 1) return 'Tomorrow';
+    if (difference > 1) return `In ${difference} days`;
+    if (difference === -1) return 'Yesterday';
 
-    return dueDateStr;
+    return `${Math.abs(difference)} days ago`;
+  };
+
+  const handleAddEvent = async e => {
+    e.preventDefault();
+    if (saving) return;
+
+    if (!newTitle.trim() || !eventDate) {
+      setError('Enter an event name and choose a date.');
+      return;
+    }
+
+    setSaving(true);
+    setError('');
+
+    try {
+      await addDoc(collection(db, 'tasks'), {
+        scope: 'calendar',
+        owner: null,
+        author: getAuthorInitial(user),
+        title: newTitle.trim(),
+        dueDate: eventDate,
+        completed: false,
+        createdAt: serverTimestamp(),
+        completedAt: null
+      });
+
+      setNewTitle('');
+      setEventDate('');
+    } catch (err) {
+      console.error('Error adding calendar event:', err);
+      setError(
+        'Could not save the event. Check your connection and Firebase permissions.'
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteEvent = async item => {
+    // Existing dated tasks are reference items in this view.
+    if (item.scope !== 'calendar' || deletingId) return;
+
+    const confirmed = window.confirm(
+      `Delete the event "${item.title}"? This cannot be undone.`
+    );
+
+    if (!confirmed) return;
+
+    setDeletingId(item.id);
+    setError('');
+
+    try {
+      await deleteDoc(doc(db, 'tasks', item.id));
+    } catch (err) {
+      console.error('Error deleting calendar event:', err);
+      setError('Could not delete the event. Please try again.');
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-black uppercase">
-            Upcoming Shared Timeline
+          <h2 className="text-lg font-black uppercase flex items-center gap-2">
+            <Calendar className="w-5 h-5 text-[#D946EF]" />
+            Calendar
           </h2>
+
           <p className="text-xs text-gray-500">
-            Chronological list of scheduled tasks &amp; deadlines
+            Add dated events here. Ordinary to-do items do not need dates.
           </p>
         </div>
 
-        <span className="text-xs font-black bg-fuchsia-100 text-fuchsia-800 px-2 py-1">
-          {upcomingTasks.length} Scheduled
+        <span className="shrink-0 text-xs font-black bg-fuchsia-100 text-fuchsia-800 px-2 py-1">
+          {calendarItems.length} scheduled
         </span>
       </div>
 
-      {upcomingTasks.length === 0 ? (
+      <form
+        onSubmit={handleAddEvent}
+        className="bg-white p-4 border border-gray-200 space-y-3"
+      >
+        <h3 className="text-xs font-black text-[#D946EF] uppercase tracking-wider">
+          Add an event
+        </h3>
+
+        <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+          <label className="flex-1 min-w-0 text-xs font-bold">
+            Event
+
+            <input
+              type="text"
+              value={newTitle}
+              onChange={e => setNewTitle(e.target.value)}
+              placeholder="e.g. Dentist appointment or school meeting"
+              required
+              disabled={saving}
+              className="block mt-1 w-full min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
+            />
+          </label>
+
+          <label className="text-xs font-bold">
+            Date
+
+            <input
+              type="date"
+              value={eventDate}
+              onChange={e => setEventDate(e.target.value)}
+              required
+              disabled={saving}
+              className="block mt-1 w-full min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
+            />
+          </label>
+
+          <button
+            type="submit"
+            disabled={saving || !newTitle.trim() || !eventDate}
+            className="min-h-[44px] px-6 bg-[#D946EF] hover:bg-[#C026D3] disabled:opacity-50 disabled:cursor-not-allowed text-white font-black uppercase text-sm"
+          >
+            {saving ? 'Saving...' : '+ Add event'}
+          </button>
+        </div>
+      </form>
+
+      {error && (
+        <p
+          role="alert"
+          className="p-3 bg-red-50 border border-red-200 text-red-700 text-sm font-semibold"
+        >
+          {error}
+        </p>
+      )}
+
+      {calendarItems.length === 0 ? (
         <div className="bg-white p-8 text-center border border-gray-200">
           <Calendar className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-          <p className="text-xs font-bold text-gray-500">
-            No scheduled tasks with target dates found.
+
+          <p className="text-sm font-bold text-gray-500">
+            No events yet.
           </p>
-          <p className="text-[11px] text-gray-400 mt-1">
-            Add target dates when creating tasks to see them in this feed.
+
+          <p className="text-xs text-gray-400 mt-1">
+            Add your first event using the form above.
           </p>
         </div>
       ) : (
         <div className="bg-white p-4 border border-gray-200 space-y-3">
-          <div className="relative border-l-2 border-fuchsia-300 ml-3 space-y-4">
-            {upcomingTasks.map(task => {
-              const relLabel = getRelativeDayLabel(task.dueDate);
-              const isOverdue = relLabel.includes('overdue');
-
-              return (
-                <div key={task.id} className="relative pl-6">
-                  <div
-                    className={`absolute -left-[9px] top-1 w-4 h-4 rounded-full border-2 border-white ${
-                      isOverdue ? 'bg-red-500' : 'bg-[#D946EF]'
-                    }`}
+          {calendarItems.map(item => (
+            <div
+              key={item.id}
+              className="flex items-start justify-between gap-3 bg-gray-50 border border-gray-200 p-3"
+            >
+              <div className="min-w-0 space-y-1">
+                <div className="flex items-center gap-2">
+                  <AuthorBadge
+                    author={
+                      item.author || item.owner?.charAt(0) || 'H'
+                    }
                   />
 
-                  <div className="bg-gray-50 border border-gray-200 p-3 space-y-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <AuthorBadge
-                          author={
-                            task.author || task.owner?.charAt(0) || 'H'
-                          }
-                        />
-                        <span className="font-black text-sm text-[#1F2937]">
-                          {task.title}
-                        </span>
-                      </div>
-
-                      <span
-                        className={`text-[10px] font-black px-2 py-0.5 uppercase ${
-                          isOverdue
-                            ? 'bg-red-100 text-red-700 border border-red-300'
-                            : 'bg-fuchsia-100 text-fuchsia-800'
-                        }`}
-                      >
-                        {relLabel}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-2 text-[11px] text-gray-500 font-medium">
-                      <span>
-                        Target Date: <strong>{task.dueDate}</strong>
-                      </span>
-
-                      {task.scope && (
-                        <span className="uppercase text-[9px] font-black px-1.5 py-0.2 bg-gray-200 text-gray-700">
-                          {task.scope}
-                        </span>
-                      )}
-
-                      {task.section && (
-                        <span className="uppercase text-[9px] font-black px-1.5 py-0.2 bg-gray-200 text-gray-700">
-                          {task.section}
-                        </span>
-                      )}
-                    </div>
-                  </div>
+                  <span className="font-black text-sm text-[#1F2937] break-words">
+                    {item.title}
+                  </span>
                 </div>
-              );
-            })}
-          </div>
+
+                <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
+                  <time
+                    dateTime={item.dueDate}
+                    className="font-bold"
+                  >
+                    {item.dueDate}
+                  </time>
+
+                  <span>{getRelativeDayLabel(item.dueDate)}</span>
+
+                  <span className="px-1.5 py-0.5 bg-fuchsia-100 text-fuchsia-800 uppercase text-[10px] font-black">
+                    {item.scope === 'calendar'
+                      ? 'Event'
+                      : 'Existing dated task'}
+                  </span>
+                </div>
+              </div>
+
+              {item.scope === 'calendar' && (
+                <button
+                  type="button"
+                  onClick={() => handleDeleteEvent(item)}
+                  disabled={Boolean(deletingId)}
+                  aria-label={`Delete event: ${item.title}`}
+                  title="Delete event"
+                  className="shrink-0 min-h-[40px] min-w-[40px] p-2 text-red-600 hover:bg-red-50 disabled:opacity-50 flex items-center justify-center"
+                >
+                  {deletingId === item.id ? (
+                    <span className="text-xs">...</span>
+                  ) : (
+                    <Trash2 className="w-4 h-4" />
+                  )}
+                </button>
+              )}
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -1332,12 +1474,6 @@ function TaskItemRow({ task, badgeBg, onToggle, onDelete }) {
                 {task.section}
               </span>
             )}
-
-            {task.dueDate && (
-              <span className="text-[10px] font-extrabold text-gray-500 bg-gray-200 px-1.5 py-0.2">
-                Due: {task.dueDate}
-              </span>
-            )}
           </div>
         </div>
       </div>
@@ -1377,7 +1513,7 @@ function GroceryShoppingView({ items }) {
   const [showPhotoInput, setShowPhotoInput] = useState(false);
 
   const groceryItems = useMemo(
-    () => items.filter(i => i.listType === 'grocery'),
+    () => items.filter(item => item.listType === 'grocery'),
     [items]
   );
 
@@ -1466,7 +1602,7 @@ function GroceryShoppingView({ items }) {
                 <button
                   type="button"
                   onClick={() =>
-                    setQuantity(prev => Math.max(1, prev - 1))
+                    setQuantity(previous => Math.max(1, previous - 1))
                   }
                   className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]"
                 >
@@ -1479,7 +1615,7 @@ function GroceryShoppingView({ items }) {
 
                 <button
                   type="button"
-                  onClick={() => setQuantity(prev => prev + 1)}
+                  onClick={() => setQuantity(previous => previous + 1)}
                   className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]"
                 >
                   +
@@ -1529,10 +1665,13 @@ function GroceryShoppingView({ items }) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {['Prisma', 'Lidl'].map(store => {
           const storeItems = groceryItems.filter(
-            i => i.storeSection === store
+            item => item.storeSection === store
           );
-          const activeItems = storeItems.filter(i => !i.completed);
-          const completedStoreItems = storeItems.filter(i => i.completed);
+
+          const activeItems = storeItems.filter(item => !item.completed);
+          const completedStoreItems = storeItems.filter(
+            item => item.completed
+          );
 
           return (
             <div
@@ -1603,17 +1742,17 @@ function OtherShoppingView({ items }) {
   const [showPhotoInput, setShowPhotoInput] = useState(false);
 
   const otherItems = useMemo(
-    () => items.filter(i => i.listType === 'other'),
+    () => items.filter(item => item.listType === 'other'),
     [items]
   );
 
   const activeItems = useMemo(
-    () => otherItems.filter(i => !i.completed),
+    () => otherItems.filter(item => !item.completed),
     [otherItems]
   );
 
   const completedItems = useMemo(
-    () => otherItems.filter(i => i.completed),
+    () => otherItems.filter(item => item.completed),
     [otherItems]
   );
 
@@ -1691,7 +1830,7 @@ function OtherShoppingView({ items }) {
                 <button
                   type="button"
                   onClick={() =>
-                    setQuantity(prev => Math.max(1, prev - 1))
+                    setQuantity(previous => Math.max(1, previous - 1))
                   }
                   className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]"
                 >
@@ -1704,7 +1843,7 @@ function OtherShoppingView({ items }) {
 
                 <button
                   type="button"
-                  onClick={() => setQuantity(prev => prev + 1)}
+                  onClick={() => setQuantity(previous => previous + 1)}
                   className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]"
                 >
                   +
@@ -1805,7 +1944,9 @@ function ShoppingItemRow({
         <button
           onClick={onToggle}
           aria-label={
-            item.completed ? 'Mark item unpurchased' : 'Mark item purchased'
+            item.completed
+              ? 'Mark item unpurchased'
+              : 'Mark item purchased'
           }
           className={`min-h-[40px] min-w-[40px] flex items-center justify-center border ${
             item.completed
@@ -1918,6 +2059,7 @@ function AdminPanelView({ allowedUsers }) {
         <h2 className="text-lg font-black uppercase">
           Household Access Control
         </h2>
+
         <p className="text-xs text-gray-500">
           Authorized Google accounts permitted to enter CHAOS CONTROL.
         </p>
@@ -1983,6 +2125,7 @@ function AdminPanelView({ allowedUsers }) {
               <p className="font-black text-emerald-800 text-xs">
                 {PRIMARY_ADMIN_EMAIL}
               </p>
+
               <span className="text-[10px] text-emerald-600 font-bold uppercase">
                 Primary Administrator
               </span>
@@ -2002,6 +2145,7 @@ function AdminPanelView({ allowedUsers }) {
                 <p className="font-bold text-[#1F2937] text-xs">
                   {item.email}
                 </p>
+
                 <p className="text-[10px] text-gray-500">
                   Label:{' '}
                   <strong className="text-[#1F2937]">
