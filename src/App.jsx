@@ -489,7 +489,6 @@ function MobileNavButton({ active, onClick, icon, label }) {
 
 function MorningToDoView({ user, tasks }) {
   const [newTitle, setNewTitle] = useState('');
-  const [autoReset, setAutoReset] = useState(true);
   const [photoUrl, setPhotoUrl] = useState('');
   const [showPhotoInput, setShowPhotoInput] = useState(false);
 
@@ -497,30 +496,6 @@ function MorningToDoView({ user, tasks }) {
     () => tasks.filter(task => task.scope === 'morning'),
     [tasks]
   );
-
-  useEffect(() => {
-    if (!autoReset) return;
-
-    const todayStr = new Date().toISOString().split('T')[0];
-
-    morningTasks.forEach(async task => {
-      if (task.completed && task.completedAt) {
-        const compDateStr =
-          new Date(task.completedAt).toISOString().split('T')[0];
-
-        if (compDateStr < todayStr) {
-          try {
-            await updateDoc(doc(db, 'tasks', task.id), {
-              completed: false,
-              completedAt: null
-            });
-          } catch (err) {
-            console.error('Auto reset morning task error:', err);
-          }
-        }
-      }
-    });
-  }, [morningTasks, autoReset]);
 
   const activeTasks = useMemo(
     () => morningTasks.filter(task => !task.completed),
@@ -584,16 +559,6 @@ function MorningToDoView({ user, tasks }) {
           <Sun className="w-5 h-5 text-amber-500" />
           Morning Checklist
         </h2>
-
-        <label className="flex items-center gap-2 text-xs font-bold">
-          <input
-            type="checkbox"
-            checked={autoReset}
-            onChange={e => setAutoReset(e.target.checked)}
-            className="accent-amber-500 w-4 h-4"
-          />
-          Auto-reset daily
-        </label>
       </div>
 
       <div className="bg-white p-3 border border-gray-200 space-y-2">
@@ -675,7 +640,7 @@ function MorningToDoView({ user, tasks }) {
       {completedTasks.length > 0 && (
         <div className="bg-white border border-gray-200 p-4 space-y-2 opacity-75">
           <h3 className="text-[11px] font-black text-gray-500 uppercase">
-            Completed Today ({completedTasks.length})
+            Completed ({completedTasks.length})
           </h3>
 
           <div className="space-y-1.5">
@@ -1232,7 +1197,6 @@ function CalendarView({ user, tasks }) {
   }, []);
 
   // One rolling calendar month, including shorter-month handling.
-  // For example, March 31 goes back to February 28 or 29.
   const pastMonthStart = useMemo(() => {
     const [year, month, day] = todayKey.split('-').map(Number);
 
