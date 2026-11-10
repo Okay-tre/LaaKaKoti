@@ -1,4 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, {
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react';
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
@@ -11,12 +16,19 @@ import {
   getFirestore,
   collection,
   doc,
-  addDoc,
-  setDoc,
-  updateDoc,
-  deleteDoc,
+  getDoc,
+  getDocs,
   onSnapshot,
-  serverTimestamp
+  updateDoc,
+  writeBatch,
+  runTransaction,
+  serverTimestamp,
+  deleteField,
+  query,
+  where,
+  orderBy,
+  limit,
+  Timestamp
 } from 'firebase/firestore';
 import {
   Check,
@@ -34,7 +46,8 @@ import {
   UserCheck,
   Calendar,
   Image as ImageIcon,
-  Sun
+  Sun,
+  X
 } from 'lucide-react';
 
 const firebaseConfig = {
@@ -50,9 +63,14 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
+// Keep these aligned with the email addresses in your Firestore rules.
 const PRIMARY_ADMIN_EMAIL = 'patteri6907@gmail.com';
+const AUTHORIZED_EMAILS = [
+  PRIMARY_ADMIN_EMAIL,
+  'laakkjiii@gmail.com'
+];
 
-const ROOM_SECTIONS = [
+const ROOMS = [
   'Kitchen',
   'Living room',
   'Kids room',
@@ -60,34 +78,817 @@ const ROOM_SECTIONS = [
   'Parents room'
 ];
 
-function getAuthorInitial(user) {
-  if (!user) return '?';
+const PHOTO_LIFETIME = 14 * 24 * 60 * 60 * 1000;
+const PHOTO_TARGET_BYTES = 220 * 1024;
+const PHOTO_TEXT_LIMIT = 350000;
 
-  const name = user.displayName || user.email || '';
-  return name.trim().charAt(0).toUpperCase() || '?';
+const INPUT_CLASS =
+  'min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]';
+
+const BUTTON_CLASS =
+  'min-h-[44px] px-4 bg-[#D946EF] hover:bg-[#C026D3] disabled:opacity-50 disabled:cursor-not-allowed text-white font-black uppercase text-xs';
+
+const PANEL_CLASS =
+  'bg-white p-4 border border-gray-200 space-y-3';
+
+function authorInitial(user) {
+  return (user?.displayName || user?.email || '?')
+    .trim()
+    .charAt(0)
+    .toUpperCase();
 }
 
-function useFrequentSuggestions(items, currentInput, minOccurrences = 1) {
+function dateKey(date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0')
+  ].join('-');
+}
+
+function timeMillis(value) {
+  if (!value) return null;
+
+  if (typeof value.toMillis === 'function') {
+    return value.toMillis();
+  }
+
+  if (typeof value.seconds === 'number') {
+    return value.seconds * 1000;
+  }
+
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function photoExpired(uploadedAt, now = Date.now()) {
+  const uploaded = timeMillis(uploadedAt);
+
+  return uploaded !== null &&
+    now >= uploaded + PHOTO_LIFETIME;
+}
+
+function errorText(error) {
+  if (error?.code === 'permission-denied') {
+    return 'Firebase denied this operation. Check that the updated rules are published and you are signed in with an authorized email.';
+  }
+
+  if (error?.code === 'resource-exhausted') {
+    return 'The Firebase usage limit has been reached. Please try again later.';
+  }
+
+  return error?.message ||
+    'Something went wrong. Check your connection and try again.';
+}
+
+function ErrorNotice({ message }) {
+  return message ? (
+    <p
+      role="alert"
+      className="p-3 bg-red-50 border border-red-200 text-red-700 text-sm"
+    >
+      {message}
+    </p>
+  ) : null;
+}
+
+function useFrequentSuggestions(items, input) {
   return useMemo(() => {
-    const counts = {};
+    const counts = new Map();
 
     items.forEach(item => {
-      if (!item.title) return;
+      const title = item.title?.trim();
 
-      const cleanTitle = item.title.trim();
-      counts[cleanTitle] = (counts[cleanTitle] || 0) + 1;
+      if (title) {
+        counts.set(title, (counts.get(title) || 0) + 1);
+      }
     });
 
-    return Object.entries(counts)
-      .filter(
-        ([title, count]) =>
-          count >= minOccurrences &&
-          title.toLowerCase().includes(currentInput.toLowerCase())
+    return [...counts.entries()]
+      .filter(([title]) =>
+        title.toLowerCase().includes(input.toLowerCase())
       )
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8)
       .map(([title]) => title);
-  }, [items, currentInput, minOccurrences]);
+  }, [items, input]);
+}
+
+function SmartPills({ suggestions, onSelect, disabled }) {
+  if (!suggestions.length) return null;
+
+  return (
+    <div className="flex gap-2 items-center overflow-x-auto py-1">
+      <span className="text-xs font-bold text-gray-500">
+        Frequent:
+      </span>
+
+      {suggestions.map(title => (
+        <button
+          key={title}
+          type="button"
+          disabled={disabled}
+          onClick={() => onSelect(title)}
+          className="shrink-0 text-xs font-bold px-2.5 py-1 bg-fuchsia-50 text-fuchsia-700 border border-fuchsia-200 rounded-full"
+        >
+          + {title}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Process the image in the browser.
+// The original full-resolution file is never uploaded.
+async function decodePhoto(file) {
+  if (typeof window.createImageBitmap === 'function') {
+    try {
+      return await window.createImageBitmap(file, {
+        imageOrientation: 'from-image'
+      });
+    } catch {
+      // Try the ordinary image decoder next.
+    }
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+
+  try {
+    return await new Promise((resolve, reject) => {
+      const image = new window.Image();
+
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(
+        new Error(
+          'This photo format cannot be opened by your browser. Try a JPEG, PNG, WebP or screenshot.'
+        )
+      );
+
+      image.src = objectUrl;
+    });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function compressPhoto(file) {
+  if (!file || (file.type && !file.type.startsWith('image/'))) {
+    throw new Error('Please select an image file.');
+  }
+
+  if (file.size > 25 * 1024 * 1024) {
+    throw new Error('Please choose an image smaller than 25 MB.');
+  }
+
+  const image = await decodePhoto(file);
+  const canvas = document.createElement('canvas');
+
+  try {
+    const originalWidth = image.naturalWidth || image.width;
+    const originalHeight = image.naturalHeight || image.height;
+
+    if (!originalWidth || !originalHeight) {
+      throw new Error('The image is empty or unreadable.');
+    }
+
+    const scale = Math.min(
+      1,
+      1600 / Math.max(originalWidth, originalHeight)
+    );
+
+    let width = Math.max(
+      1,
+      Math.round(originalWidth * scale)
+    );
+
+    let height = Math.max(
+      1,
+      Math.round(originalHeight * scale)
+    );
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      canvas.width = width;
+      canvas.height = height;
+
+      const context = canvas.getContext('2d');
+
+      if (!context) {
+        throw new Error('This browser cannot process images.');
+      }
+
+      // JPEG has no transparency.
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+
+      for (const quality of [0.82, 0.68, 0.54, 0.4]) {
+        const dataUrl = canvas.toDataURL(
+          'image/jpeg',
+          quality
+        );
+
+        const encoded = dataUrl.slice(
+          dataUrl.indexOf(',') + 1
+        );
+
+        const padding = encoded.endsWith('==')
+          ? 2
+          : encoded.endsWith('=')
+            ? 1
+            : 0;
+
+        const bytes =
+          Math.floor(encoded.length * 3 / 4) - padding;
+
+        if (
+          dataUrl.startsWith('data:image/jpeg;base64,') &&
+          bytes <= PHOTO_TARGET_BYTES &&
+          dataUrl.length <= PHOTO_TEXT_LIMIT
+        ) {
+          return {
+            dataUrl,
+            bytes,
+            width,
+            height
+          };
+        }
+      }
+
+      width = Math.max(1, Math.floor(width * 0.75));
+      height = Math.max(1, Math.floor(height * 0.75));
+    }
+
+    throw new Error(
+      'This image could not be reduced enough. Please choose a smaller image.'
+    );
+  } finally {
+    if (typeof image.close === 'function') {
+      image.close();
+    }
+
+    canvas.width = 1;
+    canvas.height = 1;
+  }
+}
+
+function attachmentData(collectionName, itemId, photo) {
+  return {
+    itemCollection: collectionName,
+    itemId,
+    dataUrl: photo.dataUrl,
+    uploadedAt: serverTimestamp()
+  };
+}
+
+async function createItem(collectionName, data, photo) {
+  const itemRef = doc(collection(db, collectionName));
+  const batch = writeBatch(db);
+
+  const itemData = {
+    ...data,
+    createdAt: serverTimestamp()
+  };
+
+  if (photo) {
+    const imageRef = doc(collection(db, 'attachments'));
+
+    itemData.imageAttachmentId = imageRef.id;
+    itemData.imageUploadedAt = serverTimestamp();
+
+    batch.set(
+      imageRef,
+      attachmentData(collectionName, itemRef.id, photo)
+    );
+  }
+
+  batch.set(itemRef, itemData);
+  await batch.commit();
+}
+
+async function replacePhoto(collectionName, itemId, photo) {
+  const itemRef = doc(db, collectionName, itemId);
+  const imageRef = doc(collection(db, 'attachments'));
+
+  await runTransaction(db, async transaction => {
+    const itemSnapshot = await transaction.get(itemRef);
+
+    if (!itemSnapshot.exists()) {
+      throw new Error(
+        'This item was deleted. Refresh the list and try again.'
+      );
+    }
+
+    const oldId = itemSnapshot.data().imageAttachmentId;
+
+    transaction.set(
+      imageRef,
+      attachmentData(collectionName, itemId, photo)
+    );
+
+    transaction.update(itemRef, {
+      imageAttachmentId: imageRef.id,
+      imageUploadedAt: serverTimestamp(),
+      imageUrl: deleteField()
+    });
+
+    if (oldId) {
+      transaction.delete(doc(db, 'attachments', oldId));
+    }
+  });
+}
+
+async function removePhoto(collectionName, itemId) {
+  const itemRef = doc(db, collectionName, itemId);
+
+  await runTransaction(db, async transaction => {
+    const snapshot = await transaction.get(itemRef);
+    if (!snapshot.exists()) return;
+
+    const oldId = snapshot.data().imageAttachmentId;
+
+    if (oldId) {
+      transaction.delete(doc(db, 'attachments', oldId));
+    }
+
+    transaction.update(itemRef, {
+      imageAttachmentId: deleteField(),
+      imageUploadedAt: deleteField(),
+      imageUrl: deleteField()
+    });
+  });
+}
+
+async function deleteItem(collectionName, itemId) {
+  const itemRef = doc(db, collectionName, itemId);
+
+  await runTransaction(db, async transaction => {
+    const snapshot = await transaction.get(itemRef);
+    if (!snapshot.exists()) return;
+
+    const imageId = snapshot.data().imageAttachmentId;
+
+    if (imageId) {
+      transaction.delete(doc(db, 'attachments', imageId));
+    }
+
+    transaction.delete(itemRef);
+  });
+}
+
+async function toggleItem(collectionName, item) {
+  await updateDoc(doc(db, collectionName, item.id), {
+    completed: !item.completed,
+    completedAt: !item.completed
+      ? serverTimestamp()
+      : null
+  });
+}
+
+async function cleanupExpiredPhotos() {
+  const cutoff = Timestamp.fromMillis(
+    Date.now() - PHOTO_LIFETIME
+  );
+
+  // Only read expired attachments, in small batches.
+  // This is not Firestore TTL or a paid background function.
+  for (;;) {
+    const result = await getDocs(
+      query(
+        collection(db, 'attachments'),
+        where('uploadedAt', '<=', cutoff),
+        orderBy('uploadedAt'),
+        limit(25)
+      )
+    );
+
+    if (result.empty) return;
+
+    for (const candidate of result.docs) {
+      await runTransaction(db, async transaction => {
+        const image = await transaction.get(candidate.ref);
+
+        if (
+          !image.exists() ||
+          !photoExpired(image.data().uploadedAt)
+        ) {
+          return;
+        }
+
+        const data = image.data();
+
+        const validParent =
+          ['tasks', 'shopping_items'].includes(
+            data.itemCollection
+          ) &&
+          typeof data.itemId === 'string' &&
+          data.itemId &&
+          !data.itemId.includes('/');
+
+        const itemRef = validParent
+          ? doc(db, data.itemCollection, data.itemId)
+          : null;
+
+        const item = itemRef
+          ? await transaction.get(itemRef)
+          : null;
+
+        transaction.delete(candidate.ref);
+
+        // Never clear a newer replacement photo.
+        if (
+          item?.exists() &&
+          item.data().imageAttachmentId === image.id
+        ) {
+          transaction.update(itemRef, {
+            imageAttachmentId: deleteField(),
+            imageUploadedAt: deleteField()
+          });
+        }
+      });
+    }
+  }
+}
+
+function usePhotoCleanup(enabled) {
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!enabled) {
+      setError('');
+      return;
+    }
+
+    let active = true;
+    let running = false;
+
+    const clean = async () => {
+      if (!active || running) return;
+      running = true;
+
+      try {
+        await cleanupExpiredPhotos();
+
+        if (active) setError('');
+      } catch (err) {
+        console.error('Photo cleanup:', err);
+
+        if (active) {
+          setError(
+            'Expired photos are hidden, but cleanup could not finish. Check your connection and the attachment rules. It will retry while the app is open.'
+          );
+        }
+      } finally {
+        running = false;
+      }
+    };
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') clean();
+    };
+
+    clean();
+
+    const timer = window.setInterval(
+      clean,
+      10 * 60 * 1000
+    );
+
+    window.addEventListener('focus', clean);
+    document.addEventListener(
+      'visibilitychange',
+      onVisible
+    );
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', clean);
+      document.removeEventListener(
+        'visibilitychange',
+        onVisible
+      );
+    };
+  }, [enabled]);
+
+  return error;
+}
+
+function PhotoPicker({
+  photo,
+  onChange,
+  processing,
+  onProcessing,
+  disabled
+}) {
+  const input = useRef(null);
+  const [error, setError] = useState('');
+
+  const choose = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+
+    if (!file) return;
+
+    setError('');
+    onProcessing(true);
+
+    try {
+      onChange(await compressPhoto(file));
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      onProcessing(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <input
+        ref={input}
+        type="file"
+        accept="image/*"
+        onChange={choose}
+        disabled={disabled || processing}
+        className="hidden"
+      />
+
+      <button
+        type="button"
+        onClick={() => input.current?.click()}
+        disabled={disabled || processing}
+        className="min-h-[40px] px-3 bg-fuchsia-50 border border-fuchsia-200 text-fuchsia-700 font-bold text-xs inline-flex items-center gap-2 disabled:opacity-50"
+      >
+        <Camera className="w-4 h-4" />
+
+        {processing
+          ? 'Compressing photo...'
+          : photo
+            ? 'Change photo'
+            : 'Add picture'}
+      </button>
+
+      {photo && (
+        <div className="flex items-center gap-3">
+          <img
+            src={photo.dataUrl}
+            alt="Selected attachment preview"
+            className="w-20 h-20 object-cover border border-gray-200"
+          />
+
+          <p className="text-xs text-gray-500">
+            {photo.width} × {photo.height}
+            {' · '}
+            {Math.ceil(photo.bytes / 1024)} KB
+            <br />
+            Automatically compressed.
+            Expires 14 days after saving.
+          </p>
+
+          <button
+            type="button"
+            onClick={() => onChange(null)}
+            disabled={disabled || processing}
+            aria-label="Remove selected photo"
+            className="p-2 text-red-600"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+      )}
+
+      <ErrorNotice message={error} />
+    </div>
+  );
+}
+
+function PhotoAttachment({ item, collectionName, now }) {
+  const input = useRef(null);
+  const [opened, setOpened] = useState(false);
+  const [image, setImage] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const expired = photoExpired(
+    item.imageUploadedAt,
+    now
+  );
+
+  const freshImage = Boolean(
+    image &&
+    image.id === item.imageAttachmentId &&
+    !photoExpired(image.uploadedAt, now)
+  );
+
+  const legacyUrl =
+    !item.imageAttachmentId &&
+    /^https?:\/\//i.test(item.imageUrl || '')
+      ? item.imageUrl
+      : null;
+
+  const hasPhoto = Boolean(
+    item.imageAttachmentId || legacyUrl
+  );
+
+  useEffect(() => {
+    let active = true;
+
+    setImage(null);
+    setError('');
+    setLoading(false);
+
+    if (
+      !opened ||
+      !item.imageAttachmentId ||
+      expired
+    ) {
+      return () => {
+        active = false;
+      };
+    }
+
+    setLoading(true);
+
+    getDoc(doc(db, 'attachments', item.imageAttachmentId))
+      .then(snapshot => {
+        if (!active) return;
+
+        if (!snapshot.exists()) {
+          setError('This photo is no longer available.');
+          return;
+        }
+
+        const data = snapshot.data();
+
+        if (
+          !photoExpired(data.uploadedAt) &&
+          /^data:image\/jpeg;base64,/.test(data.dataUrl || '')
+        ) {
+          setImage({
+            id: snapshot.id,
+            ...data
+          });
+        } else {
+          setError('This photo has expired.');
+        }
+      })
+      .catch(err => {
+        if (active) setError(errorText(err));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [opened, item.imageAttachmentId, expired]);
+
+  const choose = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+
+    if (!file || busy) return;
+
+    setBusy(true);
+    setError('');
+
+    try {
+      const photo = await compressPhoto(file);
+
+      await replacePhoto(
+        collectionName,
+        item.id,
+        photo
+      );
+
+      setOpened(true);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!window.confirm(
+      'Remove this photo? The item itself will stay.'
+    )) {
+      return;
+    }
+
+    setBusy(true);
+    setError('');
+
+    try {
+      await removePhoto(collectionName, item.id);
+      setImage(null);
+      setOpened(false);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <input
+        ref={input}
+        type="file"
+        accept="image/*"
+        onChange={choose}
+        disabled={busy}
+        className="hidden"
+      />
+
+      <div className="flex flex-wrap gap-2 items-center text-xs">
+        {hasPhoto && !expired && (
+          <button
+            type="button"
+            onClick={() => setOpened(value => !value)}
+            className="min-h-[36px] text-fuchsia-700 font-bold inline-flex items-center gap-1"
+          >
+            <ImageIcon className="w-4 h-4" />
+            {opened ? 'Hide photo' : 'View photo'}
+          </button>
+        )}
+
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => input.current?.click()}
+          className="min-h-[36px] text-gray-600 font-bold inline-flex items-center gap-1 disabled:opacity-50"
+        >
+          <Camera className="w-4 h-4" />
+
+          {busy
+            ? 'Processing...'
+            : hasPhoto
+              ? 'Replace photo'
+              : 'Add picture'}
+        </button>
+
+        {hasPhoto && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={remove}
+            className="min-h-[36px] text-red-600 font-bold"
+          >
+            Remove photo
+          </button>
+        )}
+
+        {expired && (
+          <span className="text-gray-500">
+            Photo expired
+          </span>
+        )}
+      </div>
+
+      {opened && !expired && (
+        <div>
+          {loading && (
+            <p className="text-xs text-gray-500">
+              Loading photo...
+            </p>
+          )}
+
+          {freshImage && (
+            <img
+              src={image.dataUrl}
+              alt={`Attachment for ${item.title}`}
+              className="max-w-full max-h-96 object-contain border border-gray-200"
+            />
+          )}
+
+          {legacyUrl && (
+            <a
+              href={legacyUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <img
+                src={legacyUrl}
+                alt={`Attachment for ${item.title}`}
+                className="max-w-full max-h-96 object-contain"
+              />
+            </a>
+          )}
+
+          {legacyUrl && (
+            <p className="text-xs text-gray-500">
+              External image: the 14-day cleanup applies
+              only to new uploads.
+            </p>
+          )}
+        </div>
+      )}
+
+      <ErrorNotice message={error} />
+    </div>
+  );
 }
 
 export default function App() {
@@ -95,1110 +896,888 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('morning');
   const [personalOwner, setPersonalOwner] = useState('Johanna');
-
-  const [allowedUsers, setAllowedUsers] = useState([]);
   const [tasks, setTasks] = useState([]);
   const [shoppingItems, setShoppingItems] = useState([]);
+  const [error, setError] = useState('');
+  const [now, setNow] = useState(Date.now());
+
+  const email = user?.email?.toLowerCase() || '';
+  const authorized = AUTHORIZED_EMAILS.includes(email);
+  const isAdmin = email === PRIMARY_ADMIN_EMAIL;
+
+  const cleanupError = usePhotoCleanup(
+    Boolean(user && authorized)
+  );
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, currentUser => {
-      setUser(currentUser);
+    return onAuthStateChanged(auth, current => {
+      setUser(current);
       setAuthLoading(false);
     });
-
-    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
-    setAllowedUsers([]);
-    if (!user) return;
+    const refresh = () => setNow(Date.now());
 
-    return onSnapshot(
-      collection(db, 'allowed_users'),
-      snapshot => {
-        setAllowedUsers(
-          snapshot.docs.map(document => ({
-            id: document.id,
-            ...document.data()
-          }))
-        );
-      },
-      err => console.error('Allowed users error:', err)
+    const visible = () => {
+      if (document.visibilityState === 'visible') {
+        refresh();
+      }
+    };
+
+    const timer = window.setInterval(refresh, 60000);
+
+    window.addEventListener('focus', refresh);
+    document.addEventListener(
+      'visibilitychange',
+      visible
     );
-  }, [user]);
 
-  const userEmail = user?.email || '';
-
-  const isAdmin =
-    userEmail.toLowerCase() === PRIMARY_ADMIN_EMAIL.toLowerCase();
-
-  const isWhitelisted = useMemo(() => {
-    if (!user) return false;
-    if (isAdmin) return true;
-
-    return allowedUsers.some(
-      allowedUser =>
-        allowedUser.email?.toLowerCase() === userEmail.toLowerCase()
-    );
-  }, [user, userEmail, allowedUsers, isAdmin]);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener(
+        'visibilitychange',
+        visible
+      );
+    };
+  }, []);
 
   useEffect(() => {
     setTasks([]);
     setShoppingItems([]);
+    setError('');
 
-    if (!user || !isWhitelisted) return;
+    if (!user || !authorized) return;
 
-    const unsubTasks = onSnapshot(
+    const read = setter => snapshot => {
+      setter(
+        snapshot.docs.map(item => ({
+          ...item.data(),
+          id: item.id
+        }))
+      );
+    };
+
+    const failed = err => setError(errorText(err));
+
+    const stopTasks = onSnapshot(
       collection(db, 'tasks'),
-      snapshot => {
-        setTasks(
-          snapshot.docs.map(document => ({
-            id: document.id,
-            ...document.data()
-          }))
-        );
-      },
-      err => console.error('Tasks error:', err)
+      read(setTasks),
+      failed
     );
 
-    const unsubShopping = onSnapshot(
+    const stopShopping = onSnapshot(
       collection(db, 'shopping_items'),
-      snapshot => {
-        setShoppingItems(
-          snapshot.docs.map(document => ({
-            id: document.id,
-            ...document.data()
-          }))
-        );
-      },
-      err => console.error('Shopping error:', err)
+      read(setShoppingItems),
+      failed
     );
 
     return () => {
-      unsubTasks();
-      unsubShopping();
+      stopTasks();
+      stopShopping();
     };
-  }, [user, isWhitelisted]);
+  }, [user, authorized]);
 
-  const handleGoogleLogin = async () => {
+  const login = async () => {
+    setError('');
+
     try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
+      await signInWithPopup(
+        auth,
+        new GoogleAuthProvider()
+      );
     } catch (err) {
-      console.error('Login failed', err);
+      setError(errorText(err));
     }
   };
 
-  const handleLogout = async () => {
+  const logout = async () => {
     try {
       await signOut(auth);
     } catch (err) {
-      console.error('Sign out failed', err);
+      setError(errorText(err));
     }
   };
 
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-[#F4F5F8] text-[#1F2937] flex items-center justify-center font-sans">
-        <div className="p-8 bg-white text-center border border-gray-200">
-          <div className="animate-spin h-10 w-10 border-b-4 border-[#D946EF] mx-auto mb-4"></div>
-          <p className="text-lg font-bold text-[#1F2937]">
-            Loading CHAOS CONTROL...
-          </p>
-        </div>
+      <div className="min-h-screen flex items-center justify-center bg-[#F4F5F8] font-bold">
+        Loading CHAOS CONTROL...
       </div>
     );
   }
 
-  if (!user) {
+  if (!user || !authorized) {
     return (
-      <div className="min-h-screen bg-[#F4F5F8] text-[#1F2937] flex items-center justify-center p-4 font-sans">
-        <div className="max-w-md w-full bg-white p-8 border border-gray-300 text-center space-y-6">
-          <div className="bg-[#D946EF] p-4 text-white">
-            <h1 className="text-3xl font-black uppercase tracking-tight">
-              CHAOS CONTROL
-            </h1>
-            <p className="text-xs font-bold uppercase tracking-widest text-fuchsia-200">
-              Household Management
-            </p>
-          </div>
-
-          <p className="text-sm font-bold text-gray-700">
-            Please sign in with your authorized Google Account to continue.
-          </p>
-
-          <button
-            onClick={handleGoogleLogin}
-            className="w-full min-h-[48px] bg-[#D946EF] hover:bg-[#C026D3] text-white font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all"
-          >
-            <User className="w-5 h-5" />
-            Sign In with Google
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (user && !isWhitelisted) {
-    return (
-      <div className="min-h-screen bg-[#FEF2F2] text-[#1F2937] flex items-center justify-center p-4 font-sans leading-relaxed">
-        <div className="max-w-md w-full bg-white p-8 text-center border border-red-200">
-          <div className="w-16 h-16 bg-[#EF4444] text-white flex items-center justify-center mx-auto mb-6">
-            <ShieldAlert className="w-8 h-8" />
-          </div>
-
-          <h1 className="text-2xl font-black text-[#1F2937] mb-2">
-            Pending Admin Approval
+      <div className="min-h-screen bg-[#F4F5F8] flex items-center justify-center p-4">
+        <div className={`${PANEL_CLASS} max-w-md w-full text-center`}>
+          <h1 className="text-3xl font-black text-[#D946EF]">
+            CHAOS CONTROL
           </h1>
 
-          <p className="text-base text-[#1F2937] mb-6">
-            Your account (
-            <span className="font-bold text-[#EF4444]">{userEmail}</span>
-            ) is not whitelisted yet.
-          </p>
+          {user ? (
+            <>
+              <ShieldAlert className="w-10 h-10 mx-auto text-red-600" />
+              <p>
+                This account ({user.email}) is not one of
+                the two authorized household accounts.
+              </p>
+            </>
+          ) : (
+            <p>
+              Sign in with your authorized Google account.
+            </p>
+          )}
 
-          <div className="p-4 bg-[#FEE2E2] text-sm text-[#1F2937] text-left mb-6 font-medium">
-            Please contact the administrator (
-            <strong className="text-[#EF4444]">
-              {PRIMARY_ADMIN_EMAIL}
-            </strong>
-            ) to authorize access.
-          </div>
+          <ErrorNotice message={error} />
 
           <button
-            onClick={handleLogout}
-            className="w-full min-h-[48px] bg-[#EF4444] hover:bg-[#DC2626] text-white font-black uppercase transition-all flex items-center justify-center gap-2"
+            onClick={user ? logout : login}
+            className={`${BUTTON_CLASS} w-full`}
           >
-            <LogOut className="w-5 h-5" />
-            Sign Out
+            {user ? 'Sign out' : 'Sign in with Google'}
           </button>
         </div>
       </div>
     );
   }
 
+  const tabs = [
+    {
+      id: 'morning',
+      label: 'Morning',
+      short: 'Morning',
+      Icon: Sun
+    },
+    {
+      id: 'household',
+      label: 'Household To-Do',
+      short: 'Home',
+      Icon: Home
+    },
+    {
+      id: 'personal',
+      label: 'Personal To-Do',
+      short: 'Personal',
+      Icon: User
+    },
+    {
+      id: 'calendar',
+      label: 'Calendar',
+      short: 'Calendar',
+      Icon: Calendar
+    },
+    {
+      id: 'grocery',
+      label: 'Grocery List',
+      short: 'Grocery',
+      Icon: ShoppingCart
+    },
+    {
+      id: 'other',
+      label: 'Other Shopping',
+      short: 'Other',
+      Icon: ImageIcon
+    },
+    ...(isAdmin
+      ? [{
+          id: 'admin',
+          label: 'Admin Panel',
+          short: 'Admin',
+          Icon: UserCheck
+        }]
+      : [])
+  ];
+
   return (
-    <div className="min-h-screen bg-[#F4F5F8] text-[#1F2937] font-sans tracking-wide leading-relaxed pb-20 md:pb-6">
+    <div className="min-h-screen bg-[#F4F5F8] text-[#1F2937] font-sans pb-24 md:pb-6">
       <header className="bg-[#D946EF] text-white sticky top-0 z-30 shadow-md">
-        <div className="max-w-5xl mx-auto px-4 pt-3 pb-1">
-          <div className="flex items-center justify-between mb-3">
+        <div className="max-w-5xl mx-auto px-4 pt-3 pb-2">
+          <div className="flex justify-between items-center gap-3 mb-3">
             <div>
-              <h1 className="text-2xl font-black tracking-tighter leading-none uppercase">
+              <h1 className="text-2xl font-black uppercase leading-none">
                 CHAOS CONTROL
               </h1>
-              <p className="text-[10px] font-extrabold text-fuchsia-200 uppercase tracking-widest mt-0.5">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-fuchsia-100">
                 Household Hub
               </p>
             </div>
 
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2">
-                <div className="hidden sm:block text-right">
-                  <p className="text-xs font-black leading-tight text-white">
-                    {user.displayName || userEmail.split('@')[0]}
-                  </p>
-                  <p className="text-[10px] font-bold text-fuchsia-200 uppercase">
-                    {isAdmin ? 'Primary Admin' : 'Household Member'}
-                  </p>
-                </div>
+            <div className="flex items-center gap-2">
+              <span className="hidden sm:block text-xs font-bold">
+                {user.displayName || user.email}
+              </span>
 
-                <button
-                  onClick={handleLogout}
-                  title="Sign Out"
-                  className="min-h-[40px] px-3 bg-black/20 hover:bg-black/40 text-white font-bold flex items-center justify-center transition-all text-xs border border-white/20"
-                >
-                  <LogOut className="w-4 h-4 mr-1" />
-                  <span className="hidden sm:inline">Sign Out</span>
-                </button>
-              </div>
+              <button
+                onClick={logout}
+                title="Sign out"
+                className="p-2 border border-white/30"
+              >
+                <LogOut className="w-5 h-5" />
+              </button>
             </div>
           </div>
 
-          <nav className="hidden md:flex gap-1 border-t border-fuchsia-400/50 pt-2 overflow-x-auto">
-            <HeaderTabButton
-              active={activeTab === 'morning'}
-              onClick={() => setActiveTab('morning')}
-              label="Morning"
-              icon={<Sun className="w-3.5 h-3.5 inline mr-1" />}
-            />
-
-            <HeaderTabButton
-              active={activeTab === 'household'}
-              onClick={() => setActiveTab('household')}
-              label="Household To-Do"
-            />
-
-            <HeaderTabButton
-              active={activeTab === 'personal'}
-              onClick={() => setActiveTab('personal')}
-              label="Personal To-Do"
-            />
-
-            <HeaderTabButton
-              active={activeTab === 'calendar'}
-              onClick={() => setActiveTab('calendar')}
-              label="Calendar"
-              icon={<Calendar className="w-3.5 h-3.5 inline mr-1" />}
-            />
-
-            <HeaderTabButton
-              active={activeTab === 'grocery'}
-              onClick={() => setActiveTab('grocery')}
-              label="Grocery List"
-            />
-
-            <HeaderTabButton
-              active={activeTab === 'other'}
-              onClick={() => setActiveTab('other')}
-              label="Other Shopping"
-            />
-
-            {isAdmin && (
-              <HeaderTabButton
-                active={activeTab === 'admin'}
-                onClick={() => setActiveTab('admin')}
-                label="Admin Panel"
-              />
-            )}
+          <nav className="hidden md:flex gap-1 overflow-x-auto">
+            {tabs.map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`px-3 py-2 text-xs font-black uppercase whitespace-nowrap ${
+                  activeTab === tab.id
+                    ? 'bg-white text-fuchsia-600'
+                    : 'hover:bg-fuchsia-600'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
           </nav>
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-4">
+      <main className="max-w-5xl mx-auto px-4 py-4 space-y-3">
+        <ErrorNotice message={error} />
+        <ErrorNotice message={cleanupError} />
+
         {activeTab === 'morning' && (
-          <MorningToDoView user={user} tasks={tasks} />
+          <MorningToDoView
+            user={user}
+            tasks={tasks}
+            now={now}
+          />
         )}
 
         {activeTab === 'household' && (
-          <HouseholdToDoView user={user} tasks={tasks} />
+          <HouseholdToDoView
+            user={user}
+            tasks={tasks}
+            now={now}
+          />
         )}
 
         {activeTab === 'personal' && (
           <PersonalToDoView
             user={user}
-            personalOwner={personalOwner}
-            setPersonalOwner={setPersonalOwner}
             tasks={tasks}
+            now={now}
+            owner={personalOwner}
+            setOwner={setPersonalOwner}
           />
         )}
 
         {activeTab === 'calendar' && (
-          <CalendarView user={user} tasks={tasks} />
+          <CalendarView
+            user={user}
+            tasks={tasks}
+            now={now}
+          />
         )}
 
         {activeTab === 'grocery' && (
-          <GroceryShoppingView items={shoppingItems} />
+          <ShoppingView
+            key="grocery"
+            listType="grocery"
+            items={shoppingItems}
+            now={now}
+          />
         )}
 
         {activeTab === 'other' && (
-          <OtherShoppingView items={shoppingItems} />
+          <ShoppingView
+            key="other"
+            listType="other"
+            items={shoppingItems}
+            now={now}
+          />
         )}
 
         {activeTab === 'admin' && isAdmin && (
-          <AdminPanelView allowedUsers={allowedUsers} />
+          <AdminPanelView />
         )}
       </main>
 
-      <div className="fixed bottom-0 left-0 right-0 bg-[#D946EF] text-white p-1 flex justify-around items-center md:hidden z-40 shadow-lg border-t border-fuchsia-400">
-        <MobileNavButton
-          active={activeTab === 'morning'}
-          onClick={() => setActiveTab('morning')}
-          icon={<Sun className="w-5 h-5" />}
-          label="Morning"
-        />
-
-        <MobileNavButton
-          active={activeTab === 'household'}
-          onClick={() => setActiveTab('household')}
-          icon={<Home className="w-5 h-5" />}
-          label="Household"
-        />
-
-        <MobileNavButton
-          active={activeTab === 'personal'}
-          onClick={() => setActiveTab('personal')}
-          icon={<User className="w-5 h-5" />}
-          label="Personal"
-        />
-
-        <MobileNavButton
-          active={activeTab === 'calendar'}
-          onClick={() => setActiveTab('calendar')}
-          icon={<Calendar className="w-5 h-5" />}
-          label="Calendar"
-        />
-
-        <MobileNavButton
-          active={activeTab === 'grocery'}
-          onClick={() => setActiveTab('grocery')}
-          icon={<ShoppingCart className="w-5 h-5" />}
-          label="Grocery"
-        />
-
-        <MobileNavButton
-          active={activeTab === 'other'}
-          onClick={() => setActiveTab('other')}
-          icon={<ImageIcon className="w-5 h-5" />}
-          label="Other"
-        />
-
-        {isAdmin && (
-          <MobileNavButton
-            active={activeTab === 'admin'}
-            onClick={() => setActiveTab('admin')}
-            icon={<UserCheck className="w-5 h-5" />}
-            label="Admin"
-          />
-        )}
-      </div>
+      <nav className="fixed bottom-0 inset-x-0 bg-[#D946EF] text-white flex md:hidden z-40 p-1">
+        {tabs.map(({ id, short, Icon }) => (
+          <button
+            key={id}
+            onClick={() => setActiveTab(id)}
+            className={`flex-1 min-w-0 min-h-[48px] flex flex-col items-center justify-center ${
+              activeTab === id
+                ? 'bg-white text-fuchsia-600'
+                : ''
+            }`}
+          >
+            <Icon className="w-5 h-5" />
+            <span className="text-[9px] font-bold">
+              {short}
+            </span>
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }
 
-function HeaderTabButton({ active, onClick, label, icon }) {
+function TaskForm({
+  user,
+  scope,
+  owner = null,
+  items
+}) {
+  const [title, setTitle] = useState('');
+  const [section, setSection] = useState('Kitchen');
+  const [photo, setPhoto] = useState(null);
+  const [processing, setProcessing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const suggestions = useFrequentSuggestions(
+    items,
+    title
+  );
+
+  const save = async event => {
+    event.preventDefault();
+
+    if (!title.trim() || saving || processing) return;
+
+    setSaving(true);
+    setError('');
+
+    try {
+      await createItem(
+        'tasks',
+        {
+          scope,
+          owner,
+          author: authorInitial(user),
+          title: title.trim(),
+          section: scope === 'household' ? section : null,
+          completed: false,
+          completedAt: null
+        },
+        photo
+      );
+
+      setTitle('');
+      setPhoto(null);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <button
-      onClick={onClick}
-      className={`px-3 py-2 text-xs font-black uppercase tracking-wider transition-all border-b-2 flex items-center whitespace-nowrap ${
-        active
-          ? 'bg-white text-[#D946EF] border-white shadow-sm'
-          : 'text-white/90 hover:bg-fuchsia-600 border-transparent'
-      }`}
-    >
-      {icon}
-      {label}
-    </button>
+    <form onSubmit={save} className={PANEL_CLASS}>
+      <div className="flex flex-col sm:flex-row gap-2">
+        <input
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          required
+          disabled={saving}
+          placeholder={
+            scope === 'personal'
+              ? `Add personal task for ${owner}...`
+              : scope === 'morning'
+                ? 'Add morning task...'
+                : 'Write a quick task...'
+          }
+          className={`${INPUT_CLASS} flex-1 min-w-0`}
+        />
+
+        {scope === 'household' && (
+          <select
+            value={section}
+            onChange={e => setSection(e.target.value)}
+            disabled={saving}
+            className={INPUT_CLASS}
+          >
+            {ROOMS.map(room => (
+              <option key={room}>{room}</option>
+            ))}
+          </select>
+        )}
+
+        <button
+          type="submit"
+          disabled={saving || processing || !title.trim()}
+          className={BUTTON_CLASS}
+        >
+          {saving ? 'Saving...' : '+ Add task'}
+        </button>
+      </div>
+
+      <PhotoPicker
+        photo={photo}
+        onChange={setPhoto}
+        processing={processing}
+        onProcessing={setProcessing}
+        disabled={saving}
+      />
+
+      {scope !== 'personal' && (
+        <SmartPills
+          suggestions={suggestions}
+          onSelect={setTitle}
+          disabled={saving}
+        />
+      )}
+
+      <ErrorNotice message={error} />
+    </form>
   );
 }
 
-function MobileNavButton({ active, onClick, icon, label }) {
+function AuthorBadge({ author }) {
   return (
-    <button
-      onClick={onClick}
-      className={`min-h-[44px] flex-1 flex flex-col items-center justify-center py-1 transition-all ${
-        active
-          ? 'bg-white text-[#D946EF] font-black'
-          : 'text-white/80 hover:text-white'
-      }`}
+    <span
+      title="Author"
+      className="shrink-0 w-5 h-5 rounded-full bg-fuchsia-100 text-fuchsia-800 text-[10px] font-black inline-flex items-center justify-center"
     >
-      {icon}
-      <span className="text-[9px] font-bold uppercase">{label}</span>
-    </button>
+      {author}
+    </span>
   );
 }
 
-function MorningToDoView({ user, tasks }) {
-  const [newTitle, setNewTitle] = useState('');
-  const [photoUrl, setPhotoUrl] = useState('');
-  const [showPhotoInput, setShowPhotoInput] = useState(false);
+function ItemRow({
+  item,
+  collectionName,
+  now,
+  shopping = false
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
-  const morningTasks = useMemo(
-    () => tasks.filter(task => task.scope === 'morning'),
+  const perform = async action => {
+    if (busy) return;
+
+    setBusy(true);
+    setError('');
+
+    try {
+      await action();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = () => {
+    if (window.confirm(
+      `Delete "${item.title}" and its uploaded photo?`
+    )) {
+      perform(() => deleteItem(collectionName, item.id));
+    }
+  };
+
+  const changeQuantity = delta => perform(() =>
+    runTransaction(db, async transaction => {
+      const ref = doc(db, collectionName, item.id);
+      const snapshot = await transaction.get(ref);
+
+      if (!snapshot.exists()) return;
+
+      transaction.update(ref, {
+        quantity: Math.max(
+          1,
+          (Number(snapshot.data().quantity) || 1) + delta
+        )
+      });
+    })
+  );
+
+  return (
+    <div className="p-2 bg-gray-50 border border-gray-200 space-y-1">
+      <div className="flex items-center gap-2">
+        <button
+          disabled={busy}
+          onClick={() =>
+            perform(() => toggleItem(collectionName, item))
+          }
+          aria-label={
+            item.completed
+              ? 'Mark incomplete'
+              : 'Mark completed'
+          }
+          className={`shrink-0 min-w-[40px] min-h-[40px] flex items-center justify-center border ${
+            item.completed
+              ? 'bg-emerald-600 border-emerald-600 text-white'
+              : 'bg-white border-gray-300 text-gray-300'
+          }`}
+        >
+          <Check className="w-5 h-5" />
+        </button>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex gap-1.5 items-center">
+            {item.author && (
+              <AuthorBadge author={item.author} />
+            )}
+
+            <span
+              className={`text-sm break-words ${
+                item.completed
+                  ? 'line-through text-gray-400'
+                  : 'font-bold'
+              }`}
+            >
+              {item.title}
+            </span>
+          </div>
+
+          {item.section && (
+            <span className="text-[10px] uppercase font-bold text-fuchsia-700">
+              {item.section}
+            </span>
+          )}
+        </div>
+
+        {shopping && !item.completed && (
+          <div className="flex items-center border bg-white">
+            <button
+              disabled={busy}
+              onClick={() => changeQuantity(-1)}
+              aria-label="Decrease quantity"
+              className="min-w-[30px] min-h-[36px] flex items-center justify-center"
+            >
+              <Minus className="w-3 h-3" />
+            </button>
+
+            <span className="text-xs font-bold">
+              {item.quantity || 1}
+            </span>
+
+            <button
+              disabled={busy}
+              onClick={() => changeQuantity(1)}
+              aria-label="Increase quantity"
+              className="min-w-[30px] min-h-[36px] flex items-center justify-center"
+            >
+              <Plus className="w-3 h-3" />
+            </button>
+          </div>
+        )}
+
+        <button
+          disabled={busy}
+          onClick={remove}
+          aria-label="Delete item"
+          className="shrink-0 p-2 text-red-600"
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
+      </div>
+
+      <PhotoAttachment
+        item={item}
+        collectionName={collectionName}
+        now={now}
+      />
+
+      <ErrorNotice message={error} />
+    </div>
+  );
+}
+
+function TaskList({
+  items,
+  now,
+  empty = 'Nothing pending.'
+}) {
+  return items.length ? (
+    <div className="space-y-2">
+      {items.map(item => (
+        <ItemRow
+          key={item.id}
+          item={item}
+          collectionName="tasks"
+          now={now}
+        />
+      ))}
+    </div>
+  ) : (
+    <p className="text-xs text-gray-400 italic">
+      {empty}
+    </p>
+  );
+}
+
+function MorningToDoView({ user, tasks, now }) {
+  const items = useMemo(
+    () => tasks.filter(item => item.scope === 'morning'),
     [tasks]
   );
 
-  const activeTasks = useMemo(
-    () => morningTasks.filter(task => !task.completed),
-    [morningTasks]
-  );
-
-  const completedTasks = useMemo(
-    () => morningTasks.filter(task => task.completed),
-    [morningTasks]
-  );
-
-  const suggestions = useFrequentSuggestions(morningTasks, newTitle);
-
-  const handleQuickAdd = async e => {
-    e.preventDefault();
-    if (!newTitle.trim()) return;
-
-    try {
-      await addDoc(collection(db, 'tasks'), {
-        scope: 'morning',
-        owner: null,
-        author: getAuthorInitial(user),
-        title: newTitle.trim(),
-        completed: false,
-        imageUrl: photoUrl.trim() || null,
-        createdAt: serverTimestamp(),
-        completedAt: null
-      });
-
-      setNewTitle('');
-      setPhotoUrl('');
-      setShowPhotoInput(false);
-    } catch (err) {
-      console.error('Error adding morning task:', err);
-    }
-  };
-
-  const toggleTaskStatus = async task => {
-    try {
-      await updateDoc(doc(db, 'tasks', task.id), {
-        completed: !task.completed,
-        completedAt: !task.completed ? new Date().toISOString() : null
-      });
-    } catch (err) {
-      console.error('Error toggling task:', err);
-    }
-  };
-
-  const deleteTask = async taskId => {
-    try {
-      await deleteDoc(doc(db, 'tasks', taskId));
-    } catch (err) {
-      console.error('Error deleting task:', err);
-    }
-  };
+  const active = items.filter(item => !item.completed);
+  const completed = items.filter(item => item.completed);
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-lg font-black uppercase flex items-center gap-2">
-          <Sun className="w-5 h-5 text-amber-500" />
-          Morning Checklist
-        </h2>
-      </div>
+      <h2 className="text-lg font-black uppercase flex gap-2 items-center">
+        <Sun className="w-5 h-5 text-amber-500" />
+        Morning Checklist
+      </h2>
 
-      <div className="bg-white p-3 border border-gray-200 space-y-2">
-        <form onSubmit={handleQuickAdd} className="space-y-2">
-          <div className="flex flex-col sm:flex-row gap-2">
-            <input
-              type="text"
-              value={newTitle}
-              onChange={e => setNewTitle(e.target.value)}
-              placeholder="Add morning task..."
-              className="flex-1 min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
-            />
+      <TaskForm
+        user={user}
+        scope="morning"
+        items={items}
+      />
 
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setShowPhotoInput(!showPhotoInput)}
-                className={`min-h-[44px] px-3 flex items-center justify-center ${
-                  photoUrl || showPhotoInput
-                    ? 'bg-[#D946EF] text-white'
-                    : 'bg-gray-100 text-[#1F2937]'
-                }`}
-              >
-                <Camera className="w-5 h-5" />
-              </button>
-
-              <button
-                type="submit"
-                className="min-h-[44px] px-6 bg-[#D946EF] hover:bg-[#C026D3] text-white font-black uppercase text-sm"
-              >
-                + Add
-              </button>
-            </div>
-          </div>
-
-          {showPhotoInput && (
-            <div className="flex gap-2 pt-1">
-              <input
-                type="url"
-                value={photoUrl}
-                onChange={e => setPhotoUrl(e.target.value)}
-                placeholder="Image URL (optional)"
-                className="flex-1 min-h-[40px] px-3 bg-gray-50 border border-gray-300 text-xs font-semibold"
-              />
-            </div>
-          )}
-        </form>
-
-        <SmartPills
-          suggestions={suggestions}
-          onSelect={title => setNewTitle(title)}
-        />
-      </div>
-
-      <div className="bg-white border border-gray-200 p-4 space-y-2">
-        <h3 className="text-xs font-black text-[#1F2937] uppercase tracking-wider mb-1">
-          Active Morning Routine ({activeTasks.length})
+      <section className={PANEL_CLASS}>
+        <h3 className="text-xs font-black uppercase">
+          Active Morning Routine ({active.length})
         </h3>
 
-        {activeTasks.length === 0 ? (
-          <p className="text-xs font-semibold text-gray-400 italic py-1">
-            Morning routine complete!
-          </p>
-        ) : (
-          <div className="space-y-1.5">
-            {activeTasks.map(task => (
-              <TaskItemRow
-                key={task.id}
-                task={task}
-                badgeBg="bg-amber-500 text-white"
-                onToggle={() => toggleTaskStatus(task)}
-                onDelete={() => deleteTask(task.id)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+        <TaskList
+          items={active}
+          now={now}
+          empty="Morning routine complete!"
+        />
+      </section>
 
-      {completedTasks.length > 0 && (
-        <div className="bg-white border border-gray-200 p-4 space-y-2 opacity-75">
-          <h3 className="text-[11px] font-black text-gray-500 uppercase">
-            Completed ({completedTasks.length})
+      {completed.length > 0 && (
+        <section className={PANEL_CLASS}>
+          <h3 className="text-xs font-black uppercase text-gray-500">
+            Completed ({completed.length})
           </h3>
 
-          <div className="space-y-1.5">
-            {completedTasks.map(task => (
-              <TaskItemRow
-                key={task.id}
-                task={task}
-                badgeBg="bg-gray-400 text-white"
-                onToggle={() => toggleTaskStatus(task)}
-                onDelete={() => deleteTask(task.id)}
-              />
-            ))}
-          </div>
-        </div>
+          <TaskList items={completed} now={now} />
+        </section>
       )}
     </div>
   );
 }
 
-function SmartPills({ suggestions, onSelect }) {
-  if (!suggestions || suggestions.length === 0) return null;
+function HouseholdToDoView({ user, tasks, now }) {
+  const [months, setMonths] = useState(1);
+  const [expanded, setExpanded] = useState(false);
 
-  return (
-    <div className="flex items-center gap-2 overflow-x-auto py-1">
-      <span className="shrink-0 text-xs font-bold text-gray-500">
-        Frequent:
-      </span>
-
-      {suggestions.map(item => (
-        <button
-          key={item}
-          type="button"
-          onClick={() => onSelect(item)}
-          className="shrink-0 text-xs font-bold px-2.5 py-1 bg-fuchsia-50 hover:bg-fuchsia-100 text-fuchsia-700 border border-fuchsia-200 rounded-full transition-all"
-        >
-          + {item}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function HouseholdToDoView({ user, tasks }) {
-  const [newTitle, setNewTitle] = useState('');
-  const [selectedSection, setSelectedSection] = useState('Kitchen');
-  const [photoUrl, setPhotoUrl] = useState('');
-  const [showPhotoInput, setShowPhotoInput] = useState(false);
-  const [monthsToShow, setMonthsToShow] = useState(1);
-  const [isCompletedOpen, setIsCompletedOpen] = useState(false);
-
-  const householdTasks = useMemo(
-    () => tasks.filter(task => task.scope === 'household'),
+  const items = useMemo(
+    () => tasks.filter(item => item.scope === 'household'),
     [tasks]
   );
 
-  const activeTasks = useMemo(
-    () => householdTasks.filter(task => !task.completed),
-    [householdTasks]
+  const active = items.filter(item => !item.completed);
+
+  const cutoff = new Date(now);
+  cutoff.setMonth(cutoff.getMonth() - months);
+
+  const completed = items.filter(
+    item =>
+      item.completed &&
+      (
+        !item.completedAt ||
+        timeMillis(item.completedAt) >= cutoff.getTime()
+      )
   );
-
-  const suggestions = useFrequentSuggestions(householdTasks, newTitle);
-
-  const completedTasks = useMemo(() => {
-    const list = householdTasks.filter(task => task.completed);
-    const cutoffDate = new Date();
-
-    cutoffDate.setMonth(cutoffDate.getMonth() - monthsToShow);
-
-    return list.filter(task => {
-      if (!task.completedAt) return true;
-
-      const compDate = task.completedAt.seconds
-        ? new Date(task.completedAt.seconds * 1000)
-        : new Date(task.completedAt);
-
-      return compDate >= cutoffDate;
-    });
-  }, [householdTasks, monthsToShow]);
-
-  const handleQuickAdd = async e => {
-    e.preventDefault();
-    if (!newTitle.trim()) return;
-
-    try {
-      await addDoc(collection(db, 'tasks'), {
-        scope: 'household',
-        owner: null,
-        author: getAuthorInitial(user),
-        title: newTitle.trim(),
-        section: selectedSection,
-        completed: false,
-        imageUrl: photoUrl.trim() || null,
-        createdAt: serverTimestamp(),
-        completedAt: null
-      });
-
-      setNewTitle('');
-      setPhotoUrl('');
-      setShowPhotoInput(false);
-    } catch (err) {
-      console.error('Error adding household task:', err);
-    }
-  };
-
-  const toggleTaskStatus = async task => {
-    try {
-      await updateDoc(doc(db, 'tasks', task.id), {
-        completed: !task.completed,
-        completedAt: !task.completed ? new Date().toISOString() : null
-      });
-    } catch (err) {
-      console.error('Error toggling task:', err);
-    }
-  };
-
-  const deleteTask = async taskId => {
-    try {
-      await deleteDoc(doc(db, 'tasks', taskId));
-    } catch (err) {
-      console.error('Error deleting task:', err);
-    }
-  };
 
   return (
     <div className="space-y-4">
-      <div className="bg-white p-3 border border-gray-200 space-y-2">
-        <form onSubmit={handleQuickAdd} className="space-y-2">
-          <div className="flex flex-col sm:flex-row gap-2">
-            <input
-              type="text"
-              value={newTitle}
-              onChange={e => setNewTitle(e.target.value)}
-              placeholder="Write a quick task..."
-              className="flex-1 min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
-            />
+      <TaskForm
+        user={user}
+        scope="household"
+        items={items}
+      />
 
-            <select
-              value={selectedSection}
-              onChange={e => setSelectedSection(e.target.value)}
-              className="min-h-[44px] px-3 bg-gray-50 border border-gray-300 font-bold text-sm text-[#1F2937]"
-            >
-              {ROOM_SECTIONS.map(room => (
-                <option key={room} value={room}>
-                  {room}
-                </option>
-              ))}
-            </select>
-
-            <button
-              type="button"
-              onClick={() => setShowPhotoInput(!showPhotoInput)}
-              aria-label="Add photo URL"
-              className={`min-h-[44px] px-3 flex items-center justify-center ${
-                photoUrl || showPhotoInput
-                  ? 'bg-[#D946EF] text-white'
-                  : 'bg-gray-100 text-[#1F2937]'
-              }`}
-            >
-              <Camera className="w-5 h-5" />
-            </button>
-
-            <button
-              type="submit"
-              className="min-h-[44px] px-6 bg-[#D946EF] hover:bg-[#C026D3] text-white font-black uppercase text-sm"
-            >
-              + Add Task
-            </button>
-          </div>
-
-          {showPhotoInput && (
-            <div className="flex gap-2 pt-1">
-              <input
-                type="url"
-                value={photoUrl}
-                onChange={e => setPhotoUrl(e.target.value)}
-                placeholder="Image URL (optional)"
-                className="flex-1 min-h-[40px] px-3 bg-gray-50 border border-gray-300 text-xs font-semibold"
-              />
-            </div>
-          )}
-        </form>
-
-        <SmartPills
-          suggestions={suggestions}
-          onSelect={title => setNewTitle(title)}
-        />
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {ROOM_SECTIONS.map(room => {
-          const roomTasks = activeTasks.filter(
-            task => task.section === room
+      <div className="grid md:grid-cols-2 gap-4">
+        {ROOMS.map(room => {
+          const roomTasks = active.filter(
+            item => item.section === room
           );
 
           return (
-            <div
-              key={room}
-              className="bg-white p-4 border border-gray-200 space-y-2"
-            >
-              <div className="border-b border-gray-200 pb-2 flex items-center justify-between">
-                <h3 className="text-sm font-black text-[#1F2937] uppercase tracking-wider">
-                  {room}
-                </h3>
+            <section key={room} className={PANEL_CLASS}>
+              <h3 className="text-sm font-black uppercase border-b pb-2">
+                {room} ({roomTasks.length})
+              </h3>
 
-                <span className="bg-[#D946EF] text-white text-[10px] font-black px-2 py-0.5">
-                  {roomTasks.length}
-                </span>
-              </div>
-
-              {roomTasks.length === 0 ? (
-                <p className="text-xs text-gray-400 py-1 italic">
-                  Empty list.
-                </p>
-              ) : (
-                <div className="space-y-1.5">
-                  {roomTasks.map(task => (
-                    <TaskItemRow
-                      key={task.id}
-                      task={task}
-                      badgeBg="bg-[#D946EF] text-white"
-                      onToggle={() => toggleTaskStatus(task)}
-                      onDelete={() => deleteTask(task.id)}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
+              <TaskList
+                items={roomTasks}
+                now={now}
+                empty="Empty list."
+              />
+            </section>
           );
         })}
       </div>
 
-      <div className="bg-white border border-gray-200">
+      <section className={PANEL_CLASS}>
         <button
-          onClick={() => setIsCompletedOpen(!isCompletedOpen)}
-          className="w-full min-h-[44px] px-4 bg-gray-50 hover:bg-gray-100 flex items-center justify-between text-left"
+          onClick={() => setExpanded(!expanded)}
+          className="w-full min-h-[40px] flex justify-between items-center text-xs font-black uppercase"
         >
-          <div className="flex items-center gap-2">
-            <Check className="w-5 h-5 text-emerald-600" />
+          Completed Tasks ({completed.length})
 
-            <span className="font-black text-[#1F2937] text-xs uppercase tracking-wider">
-              Completed Tasks ({completedTasks.length})
-            </span>
-          </div>
-
-          {isCompletedOpen ? (
-            <ChevronUp className="w-5 h-5 text-[#1F2937]" />
-          ) : (
-            <ChevronDown className="w-5 h-5 text-[#1F2937]" />
-          )}
+          {expanded
+            ? <ChevronUp className="w-5 h-5" />
+            : <ChevronDown className="w-5 h-5" />}
         </button>
 
-        {isCompletedOpen && (
-          <div className="p-4 space-y-3 border-t border-gray-200">
-            <p className="text-[11px] font-bold text-gray-500">
-              Showing items from past{' '}
-              <strong className="text-[#1F2937]">
-                {monthsToShow} month{monthsToShow > 1 ? 's' : ''}
-              </strong>.
+        {expanded && (
+          <>
+            <p className="text-xs text-gray-500">
+              Showing the past {months} month
+              {months > 1 ? 's' : ''}.
             </p>
 
-            {completedTasks.length === 0 ? (
-              <p className="text-xs font-semibold text-gray-400 italic py-1">
-                No completed tasks in range.
-              </p>
-            ) : (
-              <div className="space-y-1.5">
-                {completedTasks.map(task => (
-                  <TaskItemRow
-                    key={task.id}
-                    task={task}
-                    badgeBg="bg-gray-400 text-white"
-                    onToggle={() => toggleTaskStatus(task)}
-                    onDelete={() => deleteTask(task.id)}
-                  />
-                ))}
-              </div>
-            )}
+            <TaskList
+              items={completed}
+              now={now}
+              empty="No completed tasks in range."
+            />
 
-            {monthsToShow < 12 && (
-              <div className="pt-2 border-t border-gray-100 flex justify-center">
-                <button
-                  onClick={() =>
-                    setMonthsToShow(previous =>
-                      Math.min(previous + 1, 12)
-                    )
-                  }
-                  className="min-h-[40px] px-4 bg-[#D946EF] hover:bg-[#C026D3] text-white font-extrabold uppercase text-xs flex items-center gap-2"
-                >
-                  <Calendar className="w-4 h-4" />
-                  Show 1 Month More
-                </button>
-              </div>
+            {months < 12 && (
+              <button
+                onClick={() =>
+                  setMonths(value => Math.min(value + 1, 12))
+                }
+                className={BUTTON_CLASS}
+              >
+                Show 1 month more
+              </button>
             )}
-          </div>
+          </>
         )}
-      </div>
+      </section>
     </div>
   );
 }
 
 function PersonalToDoView({
   user,
-  personalOwner,
-  setPersonalOwner,
-  tasks
+  tasks,
+  now,
+  owner,
+  setOwner
 }) {
-  const [newTitle, setNewTitle] = useState('');
-  const [photoUrl, setPhotoUrl] = useState('');
-  const [showPhotoInput, setShowPhotoInput] = useState(false);
-
-  const personalTasks = useMemo(
-    () =>
-      tasks.filter(
-        task =>
-          task.scope === 'personal' &&
-          task.owner === personalOwner
-      ),
-    [tasks, personalOwner]
+  const items = useMemo(
+    () => tasks.filter(
+      item =>
+        item.scope === 'personal' &&
+        item.owner === owner
+    ),
+    [tasks, owner]
   );
 
-  const activeTasks = useMemo(
-    () => personalTasks.filter(task => !task.completed),
-    [personalTasks]
-  );
-
-  const completedTasks = useMemo(
-    () => personalTasks.filter(task => task.completed),
-    [personalTasks]
-  );
-
-  const handleQuickAdd = async e => {
-    e.preventDefault();
-    if (!newTitle.trim()) return;
-
-    try {
-      await addDoc(collection(db, 'tasks'), {
-        scope: 'personal',
-        owner: personalOwner,
-        author: getAuthorInitial(user),
-        title: newTitle.trim(),
-        section: null,
-        completed: false,
-        imageUrl: photoUrl.trim() || null,
-        createdAt: serverTimestamp(),
-        completedAt: null
-      });
-
-      setNewTitle('');
-      setPhotoUrl('');
-      setShowPhotoInput(false);
-    } catch (err) {
-      console.error('Error adding personal task:', err);
-    }
-  };
-
-  const toggleTaskStatus = async task => {
-    try {
-      await updateDoc(doc(db, 'tasks', task.id), {
-        completed: !task.completed,
-        completedAt: !task.completed ? new Date().toISOString() : null
-      });
-    } catch (err) {
-      console.error('Error toggling task:', err);
-    }
-  };
-
-  const deleteTask = async taskId => {
-    try {
-      await deleteDoc(doc(db, 'tasks', taskId));
-    } catch (err) {
-      console.error('Error deleting task:', err);
-    }
-  };
+  const active = items.filter(item => !item.completed);
+  const completed = items.filter(item => item.completed);
 
   return (
     <div className="space-y-4">
-      <div className="bg-white border border-gray-200 p-3 flex items-center gap-2">
-        <span className="text-xs font-bold">List Owner:</span>
+      <div className={`${PANEL_CLASS} flex flex-wrap items-center gap-2`}>
+        <span className="text-xs font-bold">
+          List Owner:
+        </span>
 
-        {['Johanna', 'Otto'].map(owner => (
+        {['Johanna', 'Otto'].map(name => (
           <button
-            key={owner}
-            onClick={() => setPersonalOwner(owner)}
-            className={`min-h-[40px] px-5 font-black text-xs uppercase ${
-              personalOwner === owner
-                ? 'bg-[#D946EF] text-white'
-                : 'bg-gray-100 text-gray-700'
+            key={name}
+            onClick={() => setOwner(name)}
+            className={`min-h-[40px] px-5 text-xs font-black uppercase ${
+              owner === name
+                ? 'bg-fuchsia-500 text-white'
+                : 'bg-gray-100'
             }`}
           >
-            {owner}
+            {name}
           </button>
         ))}
       </div>
 
-      <div className="bg-white border border-gray-200 p-3 space-y-2">
-        <form onSubmit={handleQuickAdd} className="space-y-2">
-          <div className="flex flex-col sm:flex-row gap-2">
-            <input
-              type="text"
-              value={newTitle}
-              onChange={e => setNewTitle(e.target.value)}
-              placeholder={`Add personal task for ${personalOwner}...`}
-              className="flex-1 min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
-            />
+      <TaskForm
+        key={owner}
+        user={user}
+        scope="personal"
+        owner={owner}
+        items={items}
+      />
 
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setShowPhotoInput(!showPhotoInput)}
-                className={`min-h-[44px] px-3 flex items-center justify-center ${
-                  photoUrl || showPhotoInput
-                    ? 'bg-[#D946EF] text-white'
-                    : 'bg-gray-100 text-[#1F2937]'
-                }`}
-              >
-                <Camera className="w-5 h-5" />
-              </button>
-
-              <button
-                type="submit"
-                className="min-h-[44px] px-6 bg-[#D946EF] hover:bg-[#C026D3] text-white font-black text-sm uppercase"
-              >
-                + Add
-              </button>
-            </div>
-          </div>
-
-          {showPhotoInput && (
-            <div className="flex gap-2 pt-1">
-              <input
-                type="url"
-                value={photoUrl}
-                onChange={e => setPhotoUrl(e.target.value)}
-                placeholder="Image URL (optional)"
-                className="flex-1 min-h-[40px] px-3 bg-gray-50 border border-gray-300 text-xs font-semibold"
-              />
-            </div>
-          )}
-        </form>
-      </div>
-
-      <div className="bg-white border border-gray-200 p-4 space-y-2">
-        <h3 className="text-xs font-black text-[#1F2937] uppercase tracking-wider mb-1">
-          {personalOwner}'s Pending Tasks ({activeTasks.length})
+      <section className={PANEL_CLASS}>
+        <h3 className="text-xs font-black uppercase">
+          {owner}'s Pending Tasks ({active.length})
         </h3>
 
-        {activeTasks.length === 0 ? (
-          <p className="text-xs font-semibold text-gray-400 italic py-1">
-            Nothing pending.
-          </p>
-        ) : (
-          <div className="space-y-1.5">
-            {activeTasks.map(task => (
-              <TaskItemRow
-                key={task.id}
-                task={task}
-                badgeBg="bg-[#D946EF] text-white"
-                onToggle={() => toggleTaskStatus(task)}
-                onDelete={() => deleteTask(task.id)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+        <TaskList items={active} now={now} />
+      </section>
 
-      {completedTasks.length > 0 && (
-        <div className="bg-white border border-gray-200 p-4 space-y-2 opacity-75">
-          <h3 className="text-[11px] font-black text-gray-500 uppercase">
-            Completed ({completedTasks.length})
+      {completed.length > 0 && (
+        <section className={PANEL_CLASS}>
+          <h3 className="text-xs font-black uppercase text-gray-500">
+            Completed ({completed.length})
           </h3>
 
-          <div className="space-y-1.5">
-            {completedTasks.map(task => (
-              <TaskItemRow
-                key={task.id}
-                task={task}
-                badgeBg="bg-gray-400 text-white"
-                onToggle={() => toggleTaskStatus(task)}
-                onDelete={() => deleteTask(task.id)}
-              />
-            ))}
-          </div>
-        </div>
+          <TaskList items={completed} now={now} />
+        </section>
       )}
     </div>
   );
 }
 
-function getLocalDateKey(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-
-  return `${year}-${month}-${day}`;
-}
-
-function CalendarView({ user, tasks }) {
-  const [newTitle, setNewTitle] = useState('');
+function CalendarView({ user, tasks, now }) {
+  const [title, setTitle] = useState('');
   const [eventDate, setEventDate] = useState('');
+  const [photo, setPhoto] = useState(null);
+  const [processing, setProcessing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
   const [error, setError] = useState('');
-
-  const [showPastEvents, setShowPastEvents] = useState(false);
-  const [todayKey, setTodayKey] = useState(() =>
-    getLocalDateKey(new Date())
+  const [showPast, setShowPast] = useState(false);
+  const [today, setToday] = useState(() =>
+    dateKey(new Date())
   );
 
-  // Refresh the date at local midnight and when returning to the tab.
   useEffect(() => {
-    let timeoutId;
+    let timer;
 
-    const refreshDate = () => {
-      const now = new Date();
+    const refresh = () => {
+      const current = new Date();
+      setToday(dateKey(current));
 
-      setTodayKey(getLocalDateKey(now));
-
-      const nextMidnight = new Date(
-        now.getFullYear(),
-        now.getMonth(),
-        now.getDate() + 1
+      const midnight = new Date(
+        current.getFullYear(),
+        current.getMonth(),
+        current.getDate() + 1
       );
 
-      window.clearTimeout(timeoutId);
+      window.clearTimeout(timer);
 
-      timeoutId = window.setTimeout(
-        refreshDate,
-        nextMidnight.getTime() - now.getTime() + 100
+      timer = window.setTimeout(
+        refresh,
+        midnight.getTime() - current.getTime() + 100
       );
     };
 
-    const handleVisibilityChange = () => {
+    const visible = () => {
       if (document.visibilityState === 'visible') {
-        refreshDate();
+        refresh();
       }
     };
 
-    refreshDate();
+    refresh();
 
-    window.addEventListener('focus', refreshDate);
+    window.addEventListener('focus', refresh);
     document.addEventListener(
       'visibilitychange',
-      handleVisibilityChange
+      visible
     );
 
     return () => {
-      window.clearTimeout(timeoutId);
-      window.removeEventListener('focus', refreshDate);
+      window.clearTimeout(timer);
+      window.removeEventListener('focus', refresh);
       document.removeEventListener(
         'visibilitychange',
-        handleVisibilityChange
+        visible
       );
     };
   }, []);
 
-  // One rolling calendar month, including shorter-month handling.
-  const pastMonthStart = useMemo(() => {
-    const [year, month, day] = todayKey.split('-').map(Number);
+  const pastStart = useMemo(() => {
+    const [year, month, day] = today.split('-').map(Number);
 
     const lastDayOfPreviousMonth = new Date(
       year,
@@ -1206,59 +1785,59 @@ function CalendarView({ user, tasks }) {
       0
     ).getDate();
 
-    return getLocalDateKey(
+    return dateKey(
       new Date(
         year,
         month - 2,
         Math.min(day, lastDayOfPreviousMonth)
       )
     );
-  }, [todayKey]);
+  }, [today]);
 
-  const calendarItems = useMemo(() => {
-    const firstVisibleDate = showPastEvents
-      ? pastMonthStart
-      : todayKey;
-
-    return tasks
+  const items = useMemo(
+    () => tasks
       .filter(
         item =>
           !item.completed &&
           typeof item.dueDate === 'string' &&
           /^\d{4}-\d{2}-\d{2}$/.test(item.dueDate) &&
-          item.dueDate >= firstVisibleDate
+          item.dueDate >= (showPast ? pastStart : today)
       )
-      .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
-  }, [tasks, showPastEvents, todayKey, pastMonthStart]);
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
+    [tasks, showPast, pastStart, today]
+  );
 
-  const getRelativeDayLabel = value => {
-    const [year, month, day] = value.split('-').map(Number);
-    if (!year || !month || !day) return value;
+  const relativeDay = value => {
+    const [y, m, d] = value.split('-').map(Number);
+    const [ty, tm, td] = today.split('-').map(Number);
 
-    const [todayYear, todayMonth, todayDay] =
-      todayKey.split('-').map(Number);
-
-    const difference = Math.round(
+    const days = Math.round(
       (
-        Date.UTC(year, month - 1, day) -
-        Date.UTC(todayYear, todayMonth - 1, todayDay)
+        Date.UTC(y, m - 1, d) -
+        Date.UTC(ty, tm - 1, td)
       ) / 86400000
     );
 
-    if (difference === 0) return 'Today';
-    if (difference === 1) return 'Tomorrow';
-    if (difference > 1) return `In ${difference} days`;
-    if (difference === -1) return 'Yesterday';
-
-    return `${Math.abs(difference)} days ago`;
+    return days === 0
+      ? 'Today'
+      : days === 1
+        ? 'Tomorrow'
+        : days === -1
+          ? 'Yesterday'
+          : days > 1
+            ? `In ${days} days`
+            : `${Math.abs(days)} days ago`;
   };
 
-  const handleAddEvent = async e => {
-    e.preventDefault();
-    if (saving) return;
+  const save = async event => {
+    event.preventDefault();
 
-    if (!newTitle.trim() || !eventDate) {
-      setError('Enter an event name and choose a date.');
+    if (
+      !title.trim() ||
+      !eventDate ||
+      saving ||
+      processing
+    ) {
       return;
     }
 
@@ -1266,47 +1845,47 @@ function CalendarView({ user, tasks }) {
     setError('');
 
     try {
-      await addDoc(collection(db, 'tasks'), {
-        scope: 'calendar',
-        owner: null,
-        author: getAuthorInitial(user),
-        title: newTitle.trim(),
-        dueDate: eventDate,
-        completed: false,
-        createdAt: serverTimestamp(),
-        completedAt: null
-      });
-
-      setNewTitle('');
-      setEventDate('');
-    } catch (err) {
-      console.error('Error adding calendar event:', err);
-      setError(
-        'Could not save the event. Check your connection and Firebase permissions.'
+      await createItem(
+        'tasks',
+        {
+          scope: 'calendar',
+          owner: null,
+          author: authorInitial(user),
+          title: title.trim(),
+          dueDate: eventDate,
+          completed: false,
+          completedAt: null
+        },
+        photo
       );
+
+      setTitle('');
+      setEventDate('');
+      setPhoto(null);
+    } catch (err) {
+      setError(errorText(err));
     } finally {
       setSaving(false);
     }
   };
 
-  const handleDeleteEvent = async item => {
-    // Existing dated tasks are reference items in this view.
-    if (item.scope !== 'calendar' || deletingId) return;
-
-    const confirmed = window.confirm(
-      `Delete the event "${item.title}"? This cannot be undone.`
-    );
-
-    if (!confirmed) return;
+  const remove = async item => {
+    if (
+      deletingId ||
+      !window.confirm(
+        `Delete the event "${item.title}" and its uploaded photo?`
+      )
+    ) {
+      return;
+    }
 
     setDeletingId(item.id);
     setError('');
 
     try {
-      await deleteDoc(doc(db, 'tasks', item.id));
+      await deleteItem('tasks', item.id);
     } catch (err) {
-      console.error('Error deleting calendar event:', err);
-      setError('Could not delete the event. Please try again.');
+      setError(errorText(err));
     } finally {
       setDeletingId(null);
     }
@@ -1314,43 +1893,33 @@ function CalendarView({ user, tasks }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-black uppercase flex items-center gap-2">
-            <Calendar className="w-5 h-5 text-[#D946EF]" />
-            Calendar
-          </h2>
+      <div className="flex justify-between items-center">
+        <h2 className="text-lg font-black uppercase flex items-center gap-2">
+          <Calendar className="w-5 h-5 text-fuchsia-600" />
+          Calendar
+        </h2>
 
-          <p className="text-xs text-gray-500">
-            Add dated events here. Ordinary to-do items do not need dates.
-          </p>
-        </div>
-
-        <span className="shrink-0 text-xs font-black bg-fuchsia-100 text-fuchsia-800 px-2 py-1">
-          {calendarItems.length} shown
+        <span className="text-xs font-bold">
+          {items.length} shown
         </span>
       </div>
 
-      <form
-        onSubmit={handleAddEvent}
-        className="bg-white p-4 border border-gray-200 space-y-3"
-      >
-        <h3 className="text-xs font-black text-[#D946EF] uppercase tracking-wider">
+      <form onSubmit={save} className={PANEL_CLASS}>
+        <h3 className="text-xs font-black uppercase text-fuchsia-600">
           Add an event
         </h3>
 
-        <div className="flex flex-col sm:flex-row sm:items-end gap-3">
-          <label className="flex-1 min-w-0 text-xs font-bold">
+        <div className="flex flex-col sm:flex-row sm:items-end gap-2">
+          <label className="flex-1 text-xs font-bold">
             Event
 
             <input
-              type="text"
-              value={newTitle}
-              onChange={e => setNewTitle(e.target.value)}
-              placeholder="e.g. Dentist appointment or school meeting"
+              value={title}
+              onChange={e => setTitle(e.target.value)}
               required
               disabled={saving}
-              className="block mt-1 w-full min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
+              placeholder="e.g. Dentist appointment"
+              className={`${INPUT_CLASS} block w-full mt-1`}
             />
           </label>
 
@@ -1363,124 +1932,113 @@ function CalendarView({ user, tasks }) {
               onChange={e => setEventDate(e.target.value)}
               required
               disabled={saving}
-              className="block mt-1 w-full min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
+              className={`${INPUT_CLASS} block w-full mt-1`}
             />
           </label>
 
           <button
             type="submit"
-            disabled={saving || !newTitle.trim() || !eventDate}
-            className="min-h-[44px] px-6 bg-[#D946EF] hover:bg-[#C026D3] disabled:opacity-50 disabled:cursor-not-allowed text-white font-black uppercase text-sm"
+            disabled={
+              saving ||
+              processing ||
+              !title.trim() ||
+              !eventDate
+            }
+            className={BUTTON_CLASS}
           >
             {saving ? 'Saving...' : '+ Add event'}
           </button>
         </div>
+
+        <PhotoPicker
+          photo={photo}
+          onChange={setPhoto}
+          processing={processing}
+          onProcessing={setProcessing}
+          disabled={saving}
+        />
       </form>
 
-      {error && (
-        <p
-          role="alert"
-          className="p-3 bg-red-50 border border-red-200 text-red-700 text-sm font-semibold"
-        >
-          {error}
-        </p>
-      )}
+      <ErrorNotice message={error} />
 
-      <div className="bg-white p-4 border border-gray-200 space-y-2">
-        <label className="flex items-center gap-2 text-sm font-bold cursor-pointer">
+      <div className={PANEL_CLASS}>
+        <label className="flex items-center gap-2 text-sm font-bold">
           <input
             type="checkbox"
-            checked={showPastEvents}
-            onChange={e => setShowPastEvents(e.target.checked)}
+            checked={showPast}
+            onChange={e => setShowPast(e.target.checked)}
             className="w-4 h-4 accent-fuchsia-600"
           />
           Show past events
         </label>
 
         <p className="text-xs text-gray-500">
-          {showPastEvents
-            ? `Showing today and future events, plus past events from ${pastMonthStart} through yesterday.`
+          {showPast
+            ? `Showing today and future events, plus past events from ${pastStart} through yesterday.`
             : 'Showing today and future events. Turn this on to also see the past month.'}
         </p>
       </div>
 
-      {calendarItems.length === 0 ? (
-        <div className="bg-white p-8 text-center border border-gray-200">
-          <Calendar className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-
-          <p className="text-sm font-bold text-gray-500">
-            {showPastEvents
-              ? 'No events in this date range.'
-              : 'No upcoming events.'}
-          </p>
-
-          <p className="text-xs text-gray-400 mt-1">
-            Add an event using the form above.
-          </p>
+      {items.length === 0 ? (
+        <div className={`${PANEL_CLASS} text-center text-sm text-gray-500`}>
+          {showPast
+            ? 'No events in this date range.'
+            : 'No upcoming events.'}
         </div>
       ) : (
-        <div className="bg-white p-4 border border-gray-200 space-y-3">
-          {calendarItems.map(item => (
-            <div
+        <div className={PANEL_CLASS}>
+          {items.map(item => (
+            <article
               key={item.id}
-              className="flex items-start justify-between gap-3 bg-gray-50 border border-gray-200 p-3"
+              className="p-3 border border-gray-200 bg-gray-50 space-y-2"
             >
-              <div className="min-w-0 space-y-1">
-                <div className="flex items-center gap-2">
-                  <AuthorBadge
-                    author={
-                      item.author || item.owner?.charAt(0) || 'H'
-                    }
-                  />
+              <div className="flex items-start gap-2">
+                <AuthorBadge
+                  author={
+                    item.author ||
+                    item.owner?.charAt(0) ||
+                    'H'
+                  }
+                />
 
-                  <span className="font-black text-sm text-[#1F2937] break-words">
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-sm font-black break-words">
                     {item.title}
-                  </span>
-                </div>
+                  </h3>
 
-                <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
-                  <time
-                    dateTime={item.dueDate}
-                    className="font-bold"
-                  >
-                    {item.dueDate}
-                  </time>
+                  <p className="text-xs text-gray-500">
+                    <time dateTime={item.dueDate}>
+                      {item.dueDate}
+                    </time>
 
-                  <span
-                    className={
-                      item.dueDate < todayKey
-                        ? 'text-gray-500'
-                        : 'text-fuchsia-700 font-semibold'
-                    }
-                  >
-                    {getRelativeDayLabel(item.dueDate)}
-                  </span>
+                    {' · '}
+                    {relativeDay(item.dueDate)}
+                    {' · '}
 
-                  <span className="px-1.5 py-0.5 bg-fuchsia-100 text-fuchsia-800 uppercase text-[10px] font-black">
                     {item.scope === 'calendar'
                       ? 'Event'
                       : 'Existing dated task'}
-                  </span>
+                  </p>
                 </div>
+
+                {item.scope === 'calendar' && (
+                  <button
+                    disabled={Boolean(deletingId)}
+                    onClick={() => remove(item)}
+                    aria-label="Delete event"
+                    className="p-2 text-red-600"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
               </div>
 
-              {item.scope === 'calendar' && (
-                <button
-                  type="button"
-                  onClick={() => handleDeleteEvent(item)}
-                  disabled={Boolean(deletingId)}
-                  aria-label={`Delete event: ${item.title}`}
-                  title="Delete event"
-                  className="shrink-0 min-h-[40px] min-w-[40px] p-2 text-red-600 hover:bg-red-50 disabled:opacity-50 flex items-center justify-center"
-                >
-                  {deletingId === item.id ? (
-                    <span className="text-xs">...</span>
-                  ) : (
-                    <Trash2 className="w-4 h-4" />
-                  )}
-                </button>
-              )}
-            </div>
+              <PhotoAttachment
+                item={item}
+                collectionName="tasks"
+                now={now}
+              />
+            </article>
           ))}
         </div>
       )}
@@ -1488,319 +2046,203 @@ function CalendarView({ user, tasks }) {
   );
 }
 
-function AuthorBadge({ author }) {
-  return (
-    <span
-      className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-full bg-fuchsia-100 text-fuchsia-800 text-[10px] font-black"
-      title="Task author"
-    >
-      {author}
-    </span>
-  );
-}
-
-function TaskItemRow({ task, badgeBg, onToggle, onDelete }) {
-  return (
-    <div className="flex items-center justify-between gap-2 p-2 bg-gray-50 border border-gray-200">
-      <div className="flex items-center gap-2 flex-1 min-w-0">
-        <button
-          onClick={onToggle}
-          aria-label={
-            task.completed ? 'Mark task incomplete' : 'Complete task'
-          }
-          className={`min-h-[40px] min-w-[40px] flex items-center justify-center border ${
-            task.completed
-              ? 'bg-emerald-600 border-emerald-600 text-white'
-              : 'bg-white border-gray-300'
-          }`}
-        >
-          <Check
-            className={`w-5 h-5 stroke-[3] ${
-              task.completed ? 'text-white' : 'text-gray-300'
-            }`}
-          />
-        </button>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            {task.author && <AuthorBadge author={task.author} />}
-
-            <span
-              className={`block text-sm leading-snug break-words ${
-                task.completed
-                  ? 'line-through text-gray-400 font-medium'
-                  : 'text-[#1F2937] font-bold'
-              }`}
-            >
-              {task.title}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-1 mt-0.5">
-            {task.section && (
-              <span
-                className={`inline-block text-[10px] uppercase tracking-wider px-1.5 py-0.2 font-black ${
-                  badgeBg || 'bg-[#D946EF] text-white'
-                }`}
-              >
-                {task.section}
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2">
-        {task.imageUrl && (
-          <a
-            href={task.imageUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="min-h-[40px] min-w-[40px] border border-gray-300 overflow-hidden block relative"
-          >
-            <img
-              src={task.imageUrl}
-              alt="Task attachment"
-              className="w-full h-full object-cover"
-            />
-          </a>
-        )}
-
-        <button
-          onClick={onDelete}
-          className="min-h-[40px] min-w-[40px] p-2 text-red-600 hover:bg-red-50 flex items-center justify-center"
-        >
-          <Trash2 className="w-4 h-4 stroke-[2.5]" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function GroceryShoppingView({ items }) {
-  const [newTitle, setNewTitle] = useState('');
-  const [selectedStore, setSelectedStore] = useState('Prisma');
+function ShoppingView({ listType, items, now }) {
+  const [title, setTitle] = useState('');
+  const [store, setStore] = useState('Prisma');
   const [quantity, setQuantity] = useState(1);
-  const [photoUrl, setPhotoUrl] = useState('');
-  const [showPhotoInput, setShowPhotoInput] = useState(false);
+  const [photo, setPhoto] = useState(null);
+  const [processing, setProcessing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
 
-  const groceryItems = useMemo(
-    () => items.filter(item => item.listType === 'grocery'),
-    [items]
+  const grocery = listType === 'grocery';
+
+  const list = useMemo(
+    () => items.filter(item => item.listType === listType),
+    [items, listType]
   );
 
-  const suggestions = useFrequentSuggestions(groceryItems, newTitle);
+  const suggestions = useFrequentSuggestions(list, title);
 
-  const handleQuickAdd = async e => {
-    e.preventDefault();
-    if (!newTitle.trim()) return;
+  const save = async event => {
+    event.preventDefault();
+
+    if (!title.trim() || saving || processing) return;
+
+    setSaving(true);
+    setError('');
 
     try {
-      await addDoc(collection(db, 'shopping_items'), {
-        listType: 'grocery',
-        storeSection: selectedStore,
-        title: newTitle.trim(),
-        quantity: Number(quantity) || 1,
-        completed: false,
-        imageUrl: photoUrl.trim() || null,
-        createdAt: serverTimestamp(),
-        completedAt: null
-      });
+      await createItem(
+        'shopping_items',
+        {
+          listType,
+          storeSection: grocery ? store : 'general',
+          title: title.trim(),
+          quantity,
+          completed: false,
+          completedAt: null
+        },
+        photo
+      );
 
-      setNewTitle('');
+      setTitle('');
       setQuantity(1);
-      setPhotoUrl('');
-      setShowPhotoInput(false);
+      setPhoto(null);
     } catch (err) {
-      console.error('Error adding grocery item:', err);
+      setError(errorText(err));
+    } finally {
+      setSaving(false);
     }
   };
 
-  const toggleItem = async item => {
-    try {
-      await updateDoc(doc(db, 'shopping_items', item.id), {
-        completed: !item.completed,
-        completedAt: !item.completed ? new Date().toISOString() : null
-      });
-    } catch (err) {
-      console.error('Error toggling item:', err);
-    }
-  };
-
-  const updateQuantity = async (item, delta) => {
-    const newQty = Math.max(1, (item.quantity || 1) + delta);
-
-    try {
-      await updateDoc(doc(db, 'shopping_items', item.id), {
-        quantity: newQty
-      });
-    } catch (err) {
-      console.error('Error updating quantity:', err);
-    }
-  };
-
-  const deleteItem = async itemId => {
-    try {
-      await deleteDoc(doc(db, 'shopping_items', itemId));
-    } catch (err) {
-      console.error('Error deleting item:', err);
-    }
-  };
+  const groups = grocery
+    ? ['Prisma', 'Lidl']
+    : ['General Items'];
 
   return (
     <div className="space-y-4">
-      <div className="bg-white border border-gray-200 p-3 space-y-2">
-        <form onSubmit={handleQuickAdd} className="space-y-2">
-          <div className="flex flex-col sm:flex-row gap-2">
-            <input
-              type="text"
-              value={newTitle}
-              onChange={e => setNewTitle(e.target.value)}
-              placeholder="e.g. Milk, Bananas..."
-              className="flex-1 min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
-            />
+      <form onSubmit={save} className={PANEL_CLASS}>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            required
+            disabled={saving}
+            placeholder={
+              grocery
+                ? 'e.g. Milk, Bananas...'
+                : 'e.g. Batteries, Lightbulbs...'
+            }
+            className={`${INPUT_CLASS} flex-1 min-w-0`}
+          />
 
-            <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {grocery && (
               <select
-                value={selectedStore}
-                onChange={e => setSelectedStore(e.target.value)}
-                className="min-h-[44px] px-3 bg-gray-50 border border-gray-300 font-black text-sm text-[#1F2937]"
+                value={store}
+                onChange={e => setStore(e.target.value)}
+                disabled={saving}
+                className={INPUT_CLASS}
               >
-                <option value="Prisma">Prisma</option>
-                <option value="Lidl">Lidl</option>
+                <option>Prisma</option>
+                <option>Lidl</option>
               </select>
+            )}
 
-              <div className="flex items-center bg-gray-50 border border-gray-300">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setQuantity(previous => Math.max(1, previous - 1))
-                  }
-                  className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]"
-                >
-                  -
-                </button>
+            <div className="flex items-center border bg-gray-50">
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() =>
+                  setQuantity(value => Math.max(1, value - 1))
+                }
+                className="min-w-[36px] min-h-[44px]"
+              >
+                -
+              </button>
 
-                <span className="px-2 font-black text-sm text-[#1F2937]">
-                  {quantity}
-                </span>
-
-                <button
-                  type="button"
-                  onClick={() => setQuantity(previous => previous + 1)}
-                  className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]"
-                >
-                  +
-                </button>
-              </div>
+              <span className="text-sm font-bold">
+                {quantity}
+              </span>
 
               <button
                 type="button"
-                onClick={() => setShowPhotoInput(!showPhotoInput)}
-                className={`min-h-[44px] px-3 flex items-center justify-center ${
-                  photoUrl || showPhotoInput
-                    ? 'bg-[#D946EF] text-white'
-                    : 'bg-gray-100 text-[#1F2937]'
-                }`}
+                disabled={saving}
+                onClick={() => setQuantity(value => value + 1)}
+                className="min-w-[36px] min-h-[44px]"
               >
-                <Camera className="w-5 h-5" />
-              </button>
-
-              <button
-                type="submit"
-                className="min-h-[44px] px-6 bg-[#D946EF] hover:bg-[#C026D3] text-white font-black text-sm uppercase"
-              >
-                + Add
+                +
               </button>
             </div>
+
+            <button
+              type="submit"
+              disabled={saving || processing || !title.trim()}
+              className={BUTTON_CLASS}
+            >
+              {saving ? 'Saving...' : '+ Add'}
+            </button>
           </div>
+        </div>
 
-          {showPhotoInput && (
-            <div className="flex gap-2 pt-1">
-              <input
-                type="url"
-                value={photoUrl}
-                onChange={e => setPhotoUrl(e.target.value)}
-                placeholder="Image URL (optional)"
-                className="flex-1 min-h-[40px] px-3 bg-gray-50 border border-gray-300 text-xs font-semibold"
-              />
-            </div>
-          )}
-        </form>
-
-        <SmartPills
-          suggestions={suggestions}
-          onSelect={title => setNewTitle(title)}
+        <PhotoPicker
+          photo={photo}
+          onChange={setPhoto}
+          processing={processing}
+          onProcessing={setProcessing}
+          disabled={saving}
         />
-      </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {['Prisma', 'Lidl'].map(store => {
-          const storeItems = groceryItems.filter(
-            item => item.storeSection === store
+        {grocery && (
+          <SmartPills
+            suggestions={suggestions}
+            onSelect={setTitle}
+            disabled={saving}
+          />
+        )}
+
+        <ErrorNotice message={error} />
+      </form>
+
+      <div className={
+        grocery
+          ? 'grid md:grid-cols-2 gap-4'
+          : 'space-y-4'
+      }>
+        {groups.map(group => {
+          const groupItems = grocery
+            ? list.filter(item => item.storeSection === group)
+            : list;
+
+          const active = groupItems.filter(
+            item => !item.completed
           );
 
-          const activeItems = storeItems.filter(item => !item.completed);
-
-          const completedStoreItems = storeItems.filter(
+          const completed = groupItems.filter(
             item => item.completed
           );
 
           return (
-            <div
-              key={store}
-              className="bg-white border border-gray-200 p-4 flex flex-col justify-between"
-            >
-              <div>
-                <div className="border-b border-gray-200 pb-2 mb-3 flex items-center justify-between">
-                  <h3 className="text-sm font-black text-[#1F2937] uppercase">
-                    {store}
-                  </h3>
+            <section key={group} className={PANEL_CLASS}>
+              <h3 className="text-sm font-black uppercase border-b pb-2">
+                {group} ({active.length})
+              </h3>
 
-                  <span className="text-[10px] bg-[#D946EF] text-white px-2 py-0.5 font-black uppercase">
-                    {activeItems.length} items
-                  </span>
-                </div>
+              {active.length ? (
+                active.map(item => (
+                  <ItemRow
+                    key={item.id}
+                    item={item}
+                    collectionName="shopping_items"
+                    now={now}
+                    shopping
+                  />
+                ))
+              ) : (
+                <p className="text-xs text-gray-400 italic">
+                  No items needed.
+                </p>
+              )}
 
-                {activeItems.length === 0 ? (
-                  <p className="text-xs text-gray-400 italic py-2">
-                    No items needed.
-                  </p>
-                ) : (
-                  <div className="space-y-1.5">
-                    {activeItems.map(item => (
-                      <ShoppingItemRow
-                        key={item.id}
-                        item={item}
-                        onToggle={() => toggleItem(item)}
-                        onUpdateQty={delta => updateQuantity(item, delta)}
-                        onDelete={() => deleteItem(item.id)}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
+              {completed.length > 0 && (
+                <div className="pt-3 border-t space-y-2">
+                  <h4 className="text-[10px] uppercase font-black text-gray-500">
+                    Purchased ({completed.length})
+                  </h4>
 
-              {completedStoreItems.length > 0 && (
-                <div className="mt-4 pt-3 border-t border-gray-200">
-                  <p className="text-[10px] font-black text-gray-400 uppercase mb-1">
-                    Purchased ({completedStoreItems.length})
-                  </p>
-
-                  <div className="space-y-1.5 opacity-60">
-                    {completedStoreItems.map(item => (
-                      <ShoppingItemRow
-                        key={item.id}
-                        item={item}
-                        onToggle={() => toggleItem(item)}
-                        onUpdateQty={delta => updateQuantity(item, delta)}
-                        onDelete={() => deleteItem(item.id)}
-                      />
-                    ))}
-                  </div>
+                  {completed.map(item => (
+                    <ItemRow
+                      key={item.id}
+                      item={item}
+                      collectionName="shopping_items"
+                      now={now}
+                      shopping
+                    />
+                  ))}
                 </div>
               )}
-            </div>
+            </section>
           );
         })}
       </div>
@@ -1808,435 +2250,39 @@ function GroceryShoppingView({ items }) {
   );
 }
 
-function OtherShoppingView({ items }) {
-  const [newTitle, setNewTitle] = useState('');
-  const [quantity, setQuantity] = useState(1);
-  const [photoUrl, setPhotoUrl] = useState('');
-  const [showPhotoInput, setShowPhotoInput] = useState(false);
-
-  const otherItems = useMemo(
-    () => items.filter(item => item.listType === 'other'),
-    [items]
-  );
-
-  const activeItems = useMemo(
-    () => otherItems.filter(item => !item.completed),
-    [otherItems]
-  );
-
-  const completedItems = useMemo(
-    () => otherItems.filter(item => item.completed),
-    [otherItems]
-  );
-
-  const handleQuickAdd = async e => {
-    e.preventDefault();
-    if (!newTitle.trim()) return;
-
-    try {
-      await addDoc(collection(db, 'shopping_items'), {
-        listType: 'other',
-        storeSection: 'general',
-        title: newTitle.trim(),
-        quantity: Number(quantity) || 1,
-        completed: false,
-        imageUrl: photoUrl.trim() || null,
-        createdAt: serverTimestamp(),
-        completedAt: null
-      });
-
-      setNewTitle('');
-      setQuantity(1);
-      setPhotoUrl('');
-      setShowPhotoInput(false);
-    } catch (err) {
-      console.error('Error adding other item:', err);
-    }
-  };
-
-  const toggleItem = async item => {
-    try {
-      await updateDoc(doc(db, 'shopping_items', item.id), {
-        completed: !item.completed,
-        completedAt: !item.completed ? new Date().toISOString() : null
-      });
-    } catch (err) {
-      console.error('Error toggling item:', err);
-    }
-  };
-
-  const updateQuantity = async (item, delta) => {
-    const newQty = Math.max(1, (item.quantity || 1) + delta);
-
-    try {
-      await updateDoc(doc(db, 'shopping_items', item.id), {
-        quantity: newQty
-      });
-    } catch (err) {
-      console.error('Error updating quantity:', err);
-    }
-  };
-
-  const deleteItem = async itemId => {
-    try {
-      await deleteDoc(doc(db, 'shopping_items', itemId));
-    } catch (err) {
-      console.error('Error deleting item:', err);
-    }
-  };
-
+function AdminPanelView() {
   return (
-    <div className="space-y-4">
-      <div className="bg-white border border-gray-200 p-3 space-y-2">
-        <form onSubmit={handleQuickAdd} className="space-y-2">
-          <div className="flex flex-col sm:flex-row gap-2">
-            <input
-              type="text"
-              value={newTitle}
-              onChange={e => setNewTitle(e.target.value)}
-              placeholder="e.g. Batteries, Lightbulbs..."
-              className="flex-1 min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-sm font-bold text-[#1F2937]"
-            />
+    <section className={PANEL_CLASS}>
+      <h2 className="text-lg font-black uppercase">
+        Household Access
+      </h2>
 
-            <div className="flex flex-wrap gap-2">
-              <div className="flex items-center bg-gray-50 border border-gray-300">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setQuantity(previous => Math.max(1, previous - 1))
-                  }
-                  className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]"
-                >
-                  -
-                </button>
+      <p className="text-sm text-gray-600">
+        Access is controlled by the two email addresses
+        in your deployed Firestore rules. The old whitelist
+        form could not grant access under those rules.
+      </p>
 
-                <span className="px-2 font-black text-sm text-[#1F2937]">
-                  {quantity}
-                </span>
+      {AUTHORIZED_EMAILS.map(email => (
+        <div
+          key={email}
+          className="p-3 bg-emerald-50 border border-emerald-200 text-sm font-bold break-all"
+        >
+          {email}
 
-                <button
-                  type="button"
-                  onClick={() => setQuantity(previous => previous + 1)}
-                  className="min-h-[40px] min-w-[36px] font-black text-base text-[#1F2937]"
-                >
-                  +
-                </button>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setShowPhotoInput(!showPhotoInput)}
-                className={`min-h-[44px] px-3 flex items-center justify-center ${
-                  photoUrl || showPhotoInput
-                    ? 'bg-[#D946EF] text-white'
-                    : 'bg-gray-100 text-[#1F2937]'
-                }`}
-              >
-                <Camera className="w-5 h-5" />
-              </button>
-
-              <button
-                type="submit"
-                className="min-h-[44px] px-6 bg-[#D946EF] hover:bg-[#C026D3] text-white font-black text-sm uppercase"
-              >
-                + Add
-              </button>
-            </div>
-          </div>
-
-          {showPhotoInput && (
-            <div className="flex gap-2 pt-1">
-              <input
-                type="url"
-                value={photoUrl}
-                onChange={e => setPhotoUrl(e.target.value)}
-                placeholder="Image URL (optional)"
-                className="flex-1 min-h-[40px] px-3 bg-gray-50 border border-gray-300 text-xs font-semibold"
-              />
-            </div>
+          {email === PRIMARY_ADMIN_EMAIL && (
+            <span className="block text-xs font-normal">
+              Primary administrator
+            </span>
           )}
-        </form>
-      </div>
-
-      <div className="bg-white border border-gray-200 p-4 space-y-3">
-        <h3 className="text-xs font-black text-[#1F2937] uppercase tracking-wider">
-          General Items ({activeItems.length})
-        </h3>
-
-        {activeItems.length === 0 ? (
-          <p className="text-xs font-semibold text-gray-400 italic py-1">
-            No items needed.
-          </p>
-        ) : (
-          <div className="space-y-1.5">
-            {activeItems.map(item => (
-              <ShoppingItemRow
-                key={item.id}
-                item={item}
-                onToggle={() => toggleItem(item)}
-                onUpdateQty={delta => updateQuantity(item, delta)}
-                onDelete={() => deleteItem(item.id)}
-              />
-            ))}
-          </div>
-        )}
-
-        {completedItems.length > 0 && (
-          <div className="pt-3 border-t border-gray-200 space-y-1.5 opacity-60">
-            <h4 className="text-[10px] font-black text-gray-400 uppercase">
-              Purchased ({completedItems.length})
-            </h4>
-
-            <div className="space-y-1.5">
-              {completedItems.map(item => (
-                <ShoppingItemRow
-                  key={item.id}
-                  item={item}
-                  onToggle={() => toggleItem(item)}
-                  onUpdateQty={delta => updateQuantity(item, delta)}
-                  onDelete={() => deleteItem(item.id)}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ShoppingItemRow({
-  item,
-  onToggle,
-  onUpdateQty,
-  onDelete
-}) {
-  return (
-    <div className="flex items-center justify-between gap-2 p-2 bg-gray-50 border border-gray-200">
-      <div className="flex items-center gap-2 flex-1 min-w-0">
-        <button
-          onClick={onToggle}
-          aria-label={
-            item.completed
-              ? 'Mark item unpurchased'
-              : 'Mark item purchased'
-          }
-          className={`min-h-[40px] min-w-[40px] flex items-center justify-center border ${
-            item.completed
-              ? 'bg-emerald-600 border-emerald-600 text-white'
-              : 'bg-white border-gray-300'
-          }`}
-        >
-          <Check
-            className={`w-5 h-5 stroke-[3] ${
-              item.completed ? 'text-white' : 'text-gray-300'
-            }`}
-          />
-        </button>
-
-        <span
-          className={`text-sm flex-1 min-w-0 break-words ${
-            item.completed
-              ? 'line-through text-gray-400 font-medium'
-              : 'text-[#1F2937] font-bold'
-          }`}
-        >
-          {item.title}
-        </span>
-      </div>
-
-      <div className="flex items-center gap-2">
-        {item.imageUrl && (
-          <a
-            href={item.imageUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="min-h-[40px] min-w-[40px] border border-gray-300 overflow-hidden block relative"
-          >
-            <img
-              src={item.imageUrl}
-              alt="Shopping attachment"
-              className="w-full h-full object-cover"
-            />
-          </a>
-        )}
-
-        {!item.completed && (
-          <div className="flex items-center bg-white border border-gray-300">
-            <button
-              onClick={() => onUpdateQty(-1)}
-              className="min-h-[36px] min-w-[32px] flex items-center justify-center text-[#1F2937] font-black text-xs"
-            >
-              <Minus className="w-3.5 h-3.5 stroke-[3]" />
-            </button>
-
-            <span className="min-w-[24px] text-center font-black text-xs text-[#1F2937]">
-              {item.quantity || 1}
-            </span>
-
-            <button
-              onClick={() => onUpdateQty(1)}
-              className="min-h-[36px] min-w-[32px] flex items-center justify-center text-[#1F2937] font-black text-xs"
-            >
-              <Plus className="w-3.5 h-3.5 stroke-[3]" />
-            </button>
-          </div>
-        )}
-
-        <button
-          onClick={onDelete}
-          className="min-h-[40px] min-w-[40px] p-2 text-red-600 hover:bg-red-50 flex items-center justify-center"
-        >
-          <Trash2 className="w-4 h-4 stroke-[2.5]" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function AdminPanelView({ allowedUsers }) {
-  const [emailInput, setEmailInput] = useState('');
-  const [assignedNameInput, setAssignedNameInput] = useState('Member');
-
-  const handleAddWhitelist = async e => {
-    e.preventDefault();
-    if (!emailInput.trim()) return;
-
-    try {
-      const email = emailInput.trim().toLowerCase();
-
-      await setDoc(doc(db, 'allowed_users', email), {
-        email,
-        assignedName: assignedNameInput.trim() || 'Member',
-        addedAt: serverTimestamp()
-      });
-
-      setEmailInput('');
-      setAssignedNameInput('Member');
-    } catch (err) {
-      console.error('Error adding to whitelist:', err);
-    }
-  };
-
-  const handleRemoveWhitelist = async docId => {
-    try {
-      await deleteDoc(doc(db, 'allowed_users', docId));
-    } catch (err) {
-      console.error('Error removing from whitelist:', err);
-    }
-  };
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <h2 className="text-lg font-black uppercase">
-          Household Access Control
-        </h2>
-
-        <p className="text-xs text-gray-500">
-          Authorized Google accounts permitted to enter CHAOS CONTROL.
-        </p>
-      </div>
-
-      <form
-        onSubmit={handleAddWhitelist}
-        className="bg-white p-4 border border-gray-200 space-y-3"
-      >
-        <h3 className="text-xs font-black text-[#D946EF] uppercase tracking-wider">
-          Authorize New Email
-        </h3>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs font-extrabold text-[#1F2937] mb-1">
-              Google Email
-            </label>
-
-            <input
-              type="email"
-              value={emailInput}
-              onChange={e => setEmailInput(e.target.value)}
-              placeholder="e.g. user@gmail.com"
-              className="w-full min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-xs font-bold text-[#1F2937]"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-extrabold text-[#1F2937] mb-1">
-              Display Label
-            </label>
-
-            <input
-              type="text"
-              value={assignedNameInput}
-              onChange={e => setAssignedNameInput(e.target.value)}
-              placeholder="Otto | Johanna | Member"
-              className="w-full min-h-[44px] px-3 bg-gray-50 border border-gray-300 text-xs font-bold text-[#1F2937]"
-            />
-          </div>
         </div>
+      ))}
 
-        <div className="pt-1 flex justify-end">
-          <button
-            type="submit"
-            className="min-h-[44px] px-6 bg-[#D946EF] hover:bg-[#C026D3] text-white font-black text-xs uppercase"
-          >
-            Authorize User
-          </button>
-        </div>
-      </form>
-
-      <div className="bg-white p-4 border border-gray-200">
-        <h3 className="text-xs font-black text-[#1F2937] uppercase tracking-wider mb-3">
-          Whitelisted Accounts ({allowedUsers.length + 1})
-        </h3>
-
-        <div className="space-y-2">
-          <div className="flex items-center justify-between p-3 bg-emerald-50 border border-emerald-200">
-            <div>
-              <p className="font-black text-emerald-800 text-xs">
-                {PRIMARY_ADMIN_EMAIL}
-              </p>
-
-              <span className="text-[10px] text-emerald-600 font-bold uppercase">
-                Primary Administrator
-              </span>
-            </div>
-
-            <span className="text-[10px] bg-emerald-600 text-white px-2 py-0.5 font-black uppercase">
-              Owner
-            </span>
-          </div>
-
-          {allowedUsers.map(item => (
-            <div
-              key={item.id}
-              className="flex items-center justify-between p-3 bg-gray-50 border border-gray-200"
-            >
-              <div>
-                <p className="font-bold text-[#1F2937] text-xs">
-                  {item.email}
-                </p>
-
-                <p className="text-[10px] text-gray-500">
-                  Label:{' '}
-                  <strong className="text-[#1F2937]">
-                    {item.assignedName || 'Member'}
-                  </strong>
-                </p>
-              </div>
-
-              <button
-                onClick={() => handleRemoveWhitelist(item.id)}
-                className="min-h-[36px] px-3 bg-red-600 hover:bg-red-700 text-white font-bold text-xs uppercase"
-              >
-                Revoke
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
+      <p className="text-xs text-gray-500">
+        To change household access, update both the Firebase
+        rules and AUTHORIZED_EMAILS in this file.
+        No existing whitelist documents have been deleted.
+      </p>
+    </section>
   );
 }
