@@ -1,9 +1,4 @@
-import React, {
-  useEffect,
-  useMemo,
-  useRef,
-  useState
-} from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
@@ -43,11 +38,11 @@ import {
   ChevronDown,
   ChevronUp,
   Minus,
-  UserCheck,
   Calendar,
   Image as ImageIcon,
   Sun,
-  X
+  X,
+  Loader2
 } from 'lucide-react';
 
 const firebaseConfig = {
@@ -63,10 +58,9 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-// Keep these aligned with the email addresses in your Firestore rules.
-const PRIMARY_ADMIN_EMAIL = 'patteri6907@gmail.com';
+// Keep these aligned with your Firestore rules.
 const AUTHORIZED_EMAILS = [
-  PRIMARY_ADMIN_EMAIL,
+  'patteri6907@gmail.com',
   'laakkjiii@gmail.com'
 ];
 
@@ -91,6 +85,9 @@ const BUTTON_CLASS =
 const PANEL_CLASS =
   'bg-white p-4 border border-gray-200 space-y-3';
 
+const ICON_BUTTON_CLASS =
+  'shrink-0 w-8 h-8 sm:w-9 sm:h-9 inline-flex items-center justify-center rounded hover:bg-black/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-fuchsia-600 disabled:opacity-50 disabled:cursor-not-allowed';
+
 function authorInitial(user) {
   return (user?.displayName || user?.email || '?')
     .trim()
@@ -99,11 +96,9 @@ function authorInitial(user) {
 }
 
 function dateKey(date) {
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, '0'),
-    String(date.getDate()).padStart(2, '0')
-  ].join('-');
+  return `${date.getFullYear()}-${String(
+    date.getMonth() + 1
+  ).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
 function timeMillis(value) {
@@ -123,9 +118,7 @@ function timeMillis(value) {
 
 function photoExpired(uploadedAt, now = Date.now()) {
   const uploaded = timeMillis(uploadedAt);
-
-  return uploaded !== null &&
-    now >= uploaded + PHOTO_LIFETIME;
+  return uploaded !== null && now >= uploaded + PHOTO_LIFETIME;
 }
 
 function errorText(error) {
@@ -137,8 +130,10 @@ function errorText(error) {
     return 'The Firebase usage limit has been reached. Please try again later.';
   }
 
-  return error?.message ||
-    'Something went wrong. Check your connection and try again.';
+  return (
+    error?.message ||
+    'Something went wrong. Check your connection and try again.'
+  );
 }
 
 function ErrorNotice({ message }) {
@@ -198,8 +193,7 @@ function SmartPills({ suggestions, onSelect, disabled }) {
   );
 }
 
-// Process the image in the browser.
-// The original full-resolution file is never uploaded.
+// Browser-only processing: no full-resolution photo is uploaded.
 async function decodePhoto(file) {
   if (typeof window.createImageBitmap === 'function') {
     try {
@@ -207,7 +201,7 @@ async function decodePhoto(file) {
         imageOrientation: 'from-image'
       });
     } catch {
-      // Try the ordinary image decoder next.
+      // Some browsers support more formats through an image element.
     }
   }
 
@@ -218,11 +212,13 @@ async function decodePhoto(file) {
       const image = new window.Image();
 
       image.onload = () => resolve(image);
-      image.onerror = () => reject(
-        new Error(
-          'This photo format cannot be opened by your browser. Try a JPEG, PNG, WebP or screenshot.'
-        )
-      );
+
+      image.onerror = () =>
+        reject(
+          new Error(
+            'This photo format cannot be opened by your browser. Try a JPEG, PNG, WebP or screenshot.'
+          )
+        );
 
       image.src = objectUrl;
     });
@@ -256,15 +252,8 @@ async function compressPhoto(file) {
       1600 / Math.max(originalWidth, originalHeight)
     );
 
-    let width = Math.max(
-      1,
-      Math.round(originalWidth * scale)
-    );
-
-    let height = Math.max(
-      1,
-      Math.round(originalHeight * scale)
-    );
+    let width = Math.max(1, Math.round(originalWidth * scale));
+    let height = Math.max(1, Math.round(originalHeight * scale));
 
     for (let attempt = 0; attempt < 10; attempt += 1) {
       canvas.width = width;
@@ -276,20 +265,13 @@ async function compressPhoto(file) {
         throw new Error('This browser cannot process images.');
       }
 
-      // JPEG has no transparency.
       context.fillStyle = '#ffffff';
       context.fillRect(0, 0, width, height);
       context.drawImage(image, 0, 0, width, height);
 
       for (const quality of [0.82, 0.68, 0.54, 0.4]) {
-        const dataUrl = canvas.toDataURL(
-          'image/jpeg',
-          quality
-        );
-
-        const encoded = dataUrl.slice(
-          dataUrl.indexOf(',') + 1
-        );
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        const encoded = dataUrl.slice(dataUrl.indexOf(',') + 1);
 
         const padding = encoded.endsWith('==')
           ? 2
@@ -297,20 +279,14 @@ async function compressPhoto(file) {
             ? 1
             : 0;
 
-        const bytes =
-          Math.floor(encoded.length * 3 / 4) - padding;
+        const bytes = Math.floor(encoded.length * 3 / 4) - padding;
 
         if (
           dataUrl.startsWith('data:image/jpeg;base64,') &&
           bytes <= PHOTO_TARGET_BYTES &&
           dataUrl.length <= PHOTO_TEXT_LIMIT
         ) {
-          return {
-            dataUrl,
-            bytes,
-            width,
-            height
-          };
+          return { dataUrl, bytes, width, height };
         }
       }
 
@@ -438,9 +414,7 @@ async function deleteItem(collectionName, itemId) {
 async function toggleItem(collectionName, item) {
   await updateDoc(doc(db, collectionName, item.id), {
     completed: !item.completed,
-    completedAt: !item.completed
-      ? serverTimestamp()
-      : null
+    completedAt: !item.completed ? serverTimestamp() : null
   });
 }
 
@@ -449,8 +423,8 @@ async function cleanupExpiredPhotos() {
     Date.now() - PHOTO_LIFETIME
   );
 
-  // Only read expired attachments, in small batches.
-  // This is not Firestore TTL or a paid background function.
+  // Read only expired attachments, in small batches.
+  // This is app-driven cleanup, not Firestore TTL.
   for (;;) {
     const result = await getDocs(
       query(
@@ -477,9 +451,7 @@ async function cleanupExpiredPhotos() {
         const data = image.data();
 
         const validParent =
-          ['tasks', 'shopping_items'].includes(
-            data.itemCollection
-          ) &&
+          ['tasks', 'shopping_items'].includes(data.itemCollection) &&
           typeof data.itemId === 'string' &&
           data.itemId &&
           !data.itemId.includes('/');
@@ -494,7 +466,7 @@ async function cleanupExpiredPhotos() {
 
         transaction.delete(candidate.ref);
 
-        // Never clear a newer replacement photo.
+        // Do not clear a newer replacement photo.
         if (
           item?.exists() &&
           item.data().imageAttachmentId === image.id
@@ -523,12 +495,15 @@ function usePhotoCleanup(enabled) {
 
     const clean = async () => {
       if (!active || running) return;
+
       running = true;
 
       try {
         await cleanupExpiredPhotos();
 
-        if (active) setError('');
+        if (active) {
+          setError('');
+        }
       } catch (err) {
         console.error('Photo cleanup:', err);
 
@@ -543,7 +518,9 @@ function usePhotoCleanup(enabled) {
     };
 
     const onVisible = () => {
-      if (document.visibilityState === 'visible') clean();
+      if (document.visibilityState === 'visible') {
+        clean();
+      }
     };
 
     clean();
@@ -554,23 +531,103 @@ function usePhotoCleanup(enabled) {
     );
 
     window.addEventListener('focus', clean);
-    document.addEventListener(
-      'visibilitychange',
-      onVisible
-    );
+    document.addEventListener('visibilitychange', onVisible);
 
     return () => {
       active = false;
       window.clearInterval(timer);
       window.removeEventListener('focus', clean);
-      document.removeEventListener(
-        'visibilitychange',
-        onVisible
-      );
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [enabled]);
 
   return error;
+}
+
+// Photo previews open over the page instead of increasing row height.
+function PhotoDialog({
+  open,
+  onClose,
+  title,
+  actions,
+  children
+}) {
+  const dialog = useRef(null);
+  const titleId = useId();
+
+  useEffect(() => {
+    const element = dialog.current;
+    if (!element) return;
+
+    if (open && !element.open) {
+      element.showModal();
+    }
+
+    if (!open && element.open) {
+      element.close();
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [open]);
+
+  const closeBackdrop = event => {
+    if (event.target !== event.currentTarget) return;
+
+    const bounds = event.currentTarget.getBoundingClientRect();
+
+    if (
+      event.clientX < bounds.left ||
+      event.clientX > bounds.right ||
+      event.clientY < bounds.top ||
+      event.clientY > bounds.bottom
+    ) {
+      onClose();
+    }
+  };
+
+  return (
+    <dialog
+      ref={dialog}
+      onClose={onClose}
+      onClick={closeBackdrop}
+      aria-labelledby={titleId}
+      className="fixed inset-0 m-auto w-[92vw] max-w-xl max-h-[85vh] p-0 border border-gray-200 bg-white text-[#1F2937] shadow-2xl backdrop:bg-black/60"
+    >
+      <div className="flex items-center gap-2 p-3 border-b border-gray-200">
+        <h3
+          id={titleId}
+          className="flex-1 min-w-0 text-sm font-bold break-words"
+        >
+          {title}
+        </h3>
+
+        {actions}
+
+        <button
+          type="button"
+          onClick={onClose}
+          title="Close photo"
+          aria-label="Close photo"
+          className={`${ICON_BUTTON_CLASS} text-gray-600`}
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="p-3 space-y-3">
+        {children}
+      </div>
+    </dialog>
+  );
 }
 
 function PhotoPicker({
@@ -581,13 +638,21 @@ function PhotoPicker({
   disabled
 }) {
   const input = useRef(null);
+
   const [error, setError] = useState('');
+  const [opened, setOpened] = useState(false);
+
+  const label = processing
+    ? 'Compressing photo...'
+    : photo
+      ? 'Change selected photo'
+      : 'Add photo';
 
   const choose = async event => {
     const file = event.target.files?.[0];
     event.target.value = '';
 
-    if (!file) return;
+    if (!file || disabled || processing) return;
 
     setError('');
     onProcessing(true);
@@ -596,13 +661,20 @@ function PhotoPicker({
       onChange(await compressPhoto(file));
     } catch (err) {
       setError(errorText(err));
+      setOpened(true);
     } finally {
       onProcessing(false);
     }
   };
 
+  const clear = () => {
+    onChange(null);
+    setError('');
+    setOpened(false);
+  };
+
   return (
-    <div className="space-y-2">
+    <div className="shrink-0 flex items-center gap-1">
       <input
         ref={input}
         type="file"
@@ -616,63 +688,90 @@ function PhotoPicker({
         type="button"
         onClick={() => input.current?.click()}
         disabled={disabled || processing}
-        className="min-h-[40px] px-3 bg-fuchsia-50 border border-fuchsia-200 text-fuchsia-700 font-bold text-xs inline-flex items-center gap-2 disabled:opacity-50"
+        title={label}
+        aria-label={label}
+        aria-busy={processing}
+        className={`${ICON_BUTTON_CLASS} text-fuchsia-700`}
       >
-        <Camera className="w-4 h-4" />
-
-        {processing
-          ? 'Compressing photo...'
-          : photo
-            ? 'Change photo'
-            : 'Add picture'}
+        {processing ? (
+          <Loader2 className="w-4 h-4 animate-spin" />
+        ) : (
+          <Camera className="w-4 h-4" />
+        )}
       </button>
 
       {photo && (
-        <div className="flex items-center gap-3">
-          <img
-            src={photo.dataUrl}
-            alt="Selected attachment preview"
-            className="w-20 h-20 object-cover border border-gray-200"
-          />
-
-          <p className="text-xs text-gray-500">
-            {photo.width} × {photo.height}
-            {' · '}
-            {Math.ceil(photo.bytes / 1024)} KB
-            <br />
-            Automatically compressed.
-            Expires 14 days after saving.
-          </p>
-
-          <button
-            type="button"
-            onClick={() => onChange(null)}
-            disabled={disabled || processing}
-            aria-label="Remove selected photo"
-            className="p-2 text-red-600"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => setOpened(true)}
+          title="Preview selected photo"
+          aria-label="Preview selected photo"
+          className={`${ICON_BUTTON_CLASS} bg-fuchsia-50 text-fuchsia-700`}
+        >
+          <ImageIcon className="w-4 h-4" />
+        </button>
       )}
 
-      <ErrorNotice message={error} />
+      <PhotoDialog
+        open={opened}
+        onClose={() => setOpened(false)}
+        title="Selected photo"
+        actions={
+          photo && (
+            <button
+              type="button"
+              onClick={clear}
+              disabled={disabled || processing}
+              title="Remove selected photo"
+              aria-label="Remove selected photo"
+              className={`${ICON_BUTTON_CLASS} text-red-600`}
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+          )
+        }
+      >
+        {photo && (
+          <>
+            <img
+              src={photo.dataUrl}
+              alt="Selected attachment preview"
+              className="max-w-full max-h-[55vh] mx-auto object-contain"
+            />
+
+            <p className="text-xs text-gray-500">
+              {photo.width} × {photo.height}
+              {' · '}
+              {Math.ceil(photo.bytes / 1024)} KB.
+              Automatically compressed.
+              Expires 14 days after saving.
+            </p>
+          </>
+        )}
+
+        <ErrorNotice message={error} />
+      </PhotoDialog>
     </div>
   );
 }
 
-function PhotoAttachment({ item, collectionName, now }) {
+function PhotoAttachment({
+  item,
+  collectionName,
+  now,
+  disabled = false
+}) {
   const input = useRef(null);
+  const dialogInput = useRef(null);
+
   const [opened, setOpened] = useState(false);
   const [image, setImage] = useState(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [loadError, setLoadError] = useState('');
 
-  const expired = photoExpired(
-    item.imageUploadedAt,
-    now
-  );
+  const expired = photoExpired(item.imageUploadedAt, now);
 
   const freshImage = Boolean(
     image &&
@@ -686,22 +785,25 @@ function PhotoAttachment({ item, collectionName, now }) {
       ? item.imageUrl
       : null;
 
-  const hasPhoto = Boolean(
-    item.imageAttachmentId || legacyUrl
-  );
+  const hasPhoto = Boolean(item.imageAttachmentId || legacyUrl);
+  const available = hasPhoto && !expired;
+
+  const label = busy
+    ? 'Processing photo...'
+    : available
+      ? 'View photo'
+      : expired
+        ? 'Replace expired photo'
+        : 'Add photo';
 
   useEffect(() => {
     let active = true;
 
     setImage(null);
-    setError('');
+    setLoadError('');
     setLoading(false);
 
-    if (
-      !opened ||
-      !item.imageAttachmentId ||
-      expired
-    ) {
+    if (!opened || !item.imageAttachmentId || expired) {
       return () => {
         active = false;
       };
@@ -714,7 +816,7 @@ function PhotoAttachment({ item, collectionName, now }) {
         if (!active) return;
 
         if (!snapshot.exists()) {
-          setError('This photo is no longer available.');
+          setLoadError('This photo is no longer available.');
           return;
         }
 
@@ -729,14 +831,18 @@ function PhotoAttachment({ item, collectionName, now }) {
             ...data
           });
         } else {
-          setError('This photo has expired.');
+          setLoadError('This photo has expired.');
         }
       })
       .catch(err => {
-        if (active) setError(errorText(err));
+        if (active) {
+          setLoadError(errorText(err));
+        }
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active) {
+          setLoading(false);
+        }
       });
 
     return () => {
@@ -748,7 +854,7 @@ function PhotoAttachment({ item, collectionName, now }) {
     const file = event.target.files?.[0];
     event.target.value = '';
 
-    if (!file || busy) return;
+    if (!file || busy || disabled) return;
 
     setBusy(true);
     setError('');
@@ -765,15 +871,20 @@ function PhotoAttachment({ item, collectionName, now }) {
       setOpened(true);
     } catch (err) {
       setError(errorText(err));
+      setOpened(true);
     } finally {
       setBusy(false);
     }
   };
 
   const remove = async () => {
-    if (!window.confirm(
-      'Remove this photo? The item itself will stay.'
-    )) {
+    if (
+      busy ||
+      disabled ||
+      !window.confirm(
+        'Remove this photo? The item itself will stay.'
+      )
+    ) {
       return;
     }
 
@@ -792,101 +903,145 @@ function PhotoAttachment({ item, collectionName, now }) {
   };
 
   return (
-    <div className="space-y-2">
+    <div className="shrink-0 flex items-center">
       <input
         ref={input}
         type="file"
         accept="image/*"
         onChange={choose}
-        disabled={busy}
+        disabled={busy || disabled}
         className="hidden"
       />
 
-      <div className="flex flex-wrap gap-2 items-center text-xs">
-        {hasPhoto && !expired && (
-          <button
-            type="button"
-            onClick={() => setOpened(value => !value)}
-            className="min-h-[36px] text-fuchsia-700 font-bold inline-flex items-center gap-1"
-          >
-            <ImageIcon className="w-4 h-4" />
-            {opened ? 'Hide photo' : 'View photo'}
-          </button>
+      <button
+        type="button"
+        disabled={busy || disabled}
+        onClick={() =>
+          available
+            ? setOpened(true)
+            : input.current?.click()
+        }
+        title={label}
+        aria-label={`${label}: ${item.title}`}
+        aria-busy={busy}
+        className={`${ICON_BUTTON_CLASS} ${
+          available
+            ? 'bg-fuchsia-50 text-fuchsia-700'
+            : 'text-gray-500'
+        }`}
+      >
+        {busy ? (
+          <Loader2 className="w-4 h-4 animate-spin" />
+        ) : available ? (
+          <ImageIcon className="w-4 h-4" />
+        ) : (
+          <Camera className="w-4 h-4" />
+        )}
+      </button>
+
+      <PhotoDialog
+        open={opened}
+        onClose={() => setOpened(false)}
+        title={item.title}
+        actions={
+          <>
+            <button
+              type="button"
+              disabled={busy || disabled}
+              onClick={() => dialogInput.current?.click()}
+              title={hasPhoto ? 'Replace photo' : 'Add photo'}
+              aria-label={hasPhoto ? 'Replace photo' : 'Add photo'}
+              className={`${ICON_BUTTON_CLASS} text-fuchsia-700`}
+            >
+              {busy ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Camera className="w-4 h-4" />
+              )}
+            </button>
+
+            {hasPhoto && (
+              <button
+                type="button"
+                disabled={busy || disabled}
+                onClick={remove}
+                title="Remove photo"
+                aria-label="Remove photo"
+                className={`${ICON_BUTTON_CLASS} text-red-600`}
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            )}
+          </>
+        }
+      >
+        <input
+          ref={dialogInput}
+          type="file"
+          accept="image/*"
+          onChange={choose}
+          disabled={busy || disabled}
+          className="hidden"
+        />
+
+        {loading && (
+          <p role="status" className="text-xs text-gray-500">
+            Loading photo...
+          </p>
         )}
 
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => input.current?.click()}
-          className="min-h-[36px] text-gray-600 font-bold inline-flex items-center gap-1 disabled:opacity-50"
-        >
-          <Camera className="w-4 h-4" />
+        {busy && (
+          <p role="status" className="text-xs text-gray-500">
+            Compressing and saving photo...
+          </p>
+        )}
 
-          {busy
-            ? 'Processing...'
-            : hasPhoto
-              ? 'Replace photo'
-              : 'Add picture'}
-        </button>
+        {!expired && freshImage && (
+          <img
+            src={image.dataUrl}
+            alt={`Attachment for ${item.title}`}
+            className="max-w-full max-h-[55vh] mx-auto object-contain"
+          />
+        )}
 
-        {hasPhoto && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={remove}
-            className="min-h-[36px] text-red-600 font-bold"
+        {!expired && legacyUrl && (
+          <a
+            href={legacyUrl}
+            target="_blank"
+            rel="noopener noreferrer"
           >
-            Remove photo
-          </button>
+            <img
+              src={legacyUrl}
+              alt={`Attachment for ${item.title}`}
+              className="max-w-full max-h-[55vh] mx-auto object-contain"
+            />
+          </a>
         )}
 
         {expired && (
-          <span className="text-gray-500">
-            Photo expired
-          </span>
+          <p className="text-xs text-gray-500">
+            This photo has expired.
+            Use the camera button to add a new one.
+          </p>
         )}
-      </div>
 
-      {opened && !expired && (
-        <div>
-          {loading && (
-            <p className="text-xs text-gray-500">
-              Loading photo...
-            </p>
-          )}
+        {!hasPhoto && !busy && (
+          <p className="text-xs text-gray-500">
+            No photo attached.
+            Use the camera button to add one.
+          </p>
+        )}
 
-          {freshImage && (
-            <img
-              src={image.dataUrl}
-              alt={`Attachment for ${item.title}`}
-              className="max-w-full max-h-96 object-contain border border-gray-200"
-            />
-          )}
+        {available && (
+          <p className="text-xs text-gray-500">
+            {legacyUrl
+              ? 'External image: the 14-day cleanup applies only to new uploads.'
+              : 'Uploaded photos expire 14 days after upload.'}
+          </p>
+        )}
 
-          {legacyUrl && (
-            <a
-              href={legacyUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <img
-                src={legacyUrl}
-                alt={`Attachment for ${item.title}`}
-                className="max-w-full max-h-96 object-contain"
-              />
-            </a>
-          )}
-
-          {legacyUrl && (
-            <p className="text-xs text-gray-500">
-              External image: the 14-day cleanup applies
-              only to new uploads.
-            </p>
-          )}
-        </div>
-      )}
-
-      <ErrorNotice message={error} />
+        <ErrorNotice message={error || loadError} />
+      </PhotoDialog>
     </div>
   );
 }
@@ -903,18 +1058,19 @@ export default function App() {
 
   const email = user?.email?.toLowerCase() || '';
   const authorized = AUTHORIZED_EMAILS.includes(email);
-  const isAdmin = email === PRIMARY_ADMIN_EMAIL;
 
   const cleanupError = usePhotoCleanup(
     Boolean(user && authorized)
   );
 
-  useEffect(() => {
-    return onAuthStateChanged(auth, current => {
-      setUser(current);
-      setAuthLoading(false);
-    });
-  }, []);
+  useEffect(
+    () =>
+      onAuthStateChanged(auth, current => {
+        setUser(current);
+        setAuthLoading(false);
+      }),
+    []
+  );
 
   useEffect(() => {
     const refresh = () => setNow(Date.now());
@@ -928,18 +1084,12 @@ export default function App() {
     const timer = window.setInterval(refresh, 60000);
 
     window.addEventListener('focus', refresh);
-    document.addEventListener(
-      'visibilitychange',
-      visible
-    );
+    document.addEventListener('visibilitychange', visible);
 
     return () => {
       window.clearInterval(timer);
       window.removeEventListener('focus', refresh);
-      document.removeEventListener(
-        'visibilitychange',
-        visible
-      );
+      document.removeEventListener('visibilitychange', visible);
     };
   }, []);
 
@@ -950,14 +1100,13 @@ export default function App() {
 
     if (!user || !authorized) return;
 
-    const read = setter => snapshot => {
+    const read = setter => snapshot =>
       setter(
         snapshot.docs.map(item => ({
           ...item.data(),
           id: item.id
         }))
       );
-    };
 
     const failed = err => setError(errorText(err));
 
@@ -1019,15 +1168,14 @@ export default function App() {
           {user ? (
             <>
               <ShieldAlert className="w-10 h-10 mx-auto text-red-600" />
+
               <p>
-                This account ({user.email}) is not one of
-                the two authorized household accounts.
+                This account ({user.email}) is not one of the
+                two authorized household accounts.
               </p>
             </>
           ) : (
-            <p>
-              Sign in with your authorized Google account.
-            </p>
+            <p>Sign in with your authorized Google account.</p>
           )}
 
           <ErrorNotice message={error} />
@@ -1079,15 +1227,7 @@ export default function App() {
       label: 'Other Shopping',
       short: 'Other',
       Icon: ImageIcon
-    },
-    ...(isAdmin
-      ? [{
-          id: 'admin',
-          label: 'Admin Panel',
-          short: 'Admin',
-          Icon: UserCheck
-        }]
-      : [])
+    }
   ];
 
   return (
@@ -1099,6 +1239,7 @@ export default function App() {
               <h1 className="text-2xl font-black uppercase leading-none">
                 CHAOS CONTROL
               </h1>
+
               <p className="text-[10px] font-bold uppercase tracking-widest text-fuchsia-100">
                 Household Hub
               </p>
@@ -1192,10 +1333,6 @@ export default function App() {
             now={now}
           />
         )}
-
-        {activeTab === 'admin' && isAdmin && (
-          <AdminPanelView />
-        )}
       </main>
 
       <nav className="fixed bottom-0 inset-x-0 bg-[#D946EF] text-white flex md:hidden z-40 p-1">
@@ -1210,6 +1347,7 @@ export default function App() {
             }`}
           >
             <Icon className="w-5 h-5" />
+
             <span className="text-[9px] font-bold">
               {short}
             </span>
@@ -1233,10 +1371,7 @@ function TaskForm({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  const suggestions = useFrequentSuggestions(
-    items,
-    title
-  );
+  const suggestions = useFrequentSuggestions(items, title);
 
   const save = async event => {
     event.preventDefault();
@@ -1272,7 +1407,7 @@ function TaskForm({
 
   return (
     <form onSubmit={save} className={PANEL_CLASS}>
-      <div className="flex flex-col sm:flex-row gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <input
           value={title}
           onChange={e => setTitle(e.target.value)}
@@ -1285,7 +1420,7 @@ function TaskForm({
                 ? 'Add morning task...'
                 : 'Write a quick task...'
           }
-          className={`${INPUT_CLASS} flex-1 min-w-0`}
+          className={`${INPUT_CLASS} flex-1 min-w-[140px] max-w-full`}
         />
 
         {scope === 'household' && (
@@ -1296,10 +1431,20 @@ function TaskForm({
             className={INPUT_CLASS}
           >
             {ROOMS.map(room => (
-              <option key={room}>{room}</option>
+              <option key={room}>
+                {room}
+              </option>
             ))}
           </select>
         )}
+
+        <PhotoPicker
+          photo={photo}
+          onChange={setPhoto}
+          processing={processing}
+          onProcessing={setProcessing}
+          disabled={saving}
+        />
 
         <button
           type="submit"
@@ -1309,14 +1454,6 @@ function TaskForm({
           {saving ? 'Saving...' : '+ Add task'}
         </button>
       </div>
-
-      <PhotoPicker
-        photo={photo}
-        onChange={setPhoto}
-        processing={processing}
-        onProcessing={setProcessing}
-        disabled={saving}
-      />
 
       {scope !== 'personal' && (
         <SmartPills
@@ -1367,116 +1504,137 @@ function ItemRow({
   };
 
   const remove = () => {
-    if (window.confirm(
-      `Delete "${item.title}" and its uploaded photo?`
-    )) {
+    if (
+      window.confirm(
+        `Delete "${item.title}" and its uploaded photo?`
+      )
+    ) {
       perform(() => deleteItem(collectionName, item.id));
     }
   };
 
-  const changeQuantity = delta => perform(() =>
-    runTransaction(db, async transaction => {
-      const ref = doc(db, collectionName, item.id);
-      const snapshot = await transaction.get(ref);
+  const changeQuantity = delta =>
+    perform(() =>
+      runTransaction(db, async transaction => {
+        const ref = doc(db, collectionName, item.id);
+        const snapshot = await transaction.get(ref);
 
-      if (!snapshot.exists()) return;
+        if (!snapshot.exists()) return;
 
-      transaction.update(ref, {
-        quantity: Math.max(
-          1,
-          (Number(snapshot.data().quantity) || 1) + delta
-        )
-      });
-    })
-  );
+        transaction.update(ref, {
+          quantity: Math.max(
+            1,
+            (Number(snapshot.data().quantity) || 1) + delta
+          )
+        });
+      })
+    );
 
   return (
-    <div className="p-2 bg-gray-50 border border-gray-200 space-y-1">
-      <div className="flex items-center gap-2">
+    <div className="px-2 py-1 bg-gray-50 border border-gray-200">
+      <div className="flex items-center gap-1 sm:gap-1.5">
         <button
+          type="button"
           disabled={busy}
           onClick={() =>
             perform(() => toggleItem(collectionName, item))
           }
-          aria-label={
+          title={
             item.completed
               ? 'Mark incomplete'
               : 'Mark completed'
           }
-          className={`shrink-0 min-w-[40px] min-h-[40px] flex items-center justify-center border ${
+          aria-label={`${
+            item.completed
+              ? 'Mark incomplete'
+              : 'Mark completed'
+          }: ${item.title}`}
+          aria-pressed={Boolean(item.completed)}
+          className={`${ICON_BUTTON_CLASS} border ${
             item.completed
               ? 'bg-emerald-600 border-emerald-600 text-white'
               : 'bg-white border-gray-300 text-gray-300'
           }`}
         >
-          <Check className="w-5 h-5" />
+          <Check className="w-4 h-4" />
         </button>
 
-        <div className="flex-1 min-w-0">
-          <div className="flex gap-1.5 items-center">
-            {item.author && (
-              <AuthorBadge author={item.author} />
-            )}
+        {item.author && (
+          <AuthorBadge author={item.author} />
+        )}
 
-            <span
-              className={`text-sm break-words ${
-                item.completed
-                  ? 'line-through text-gray-400'
-                  : 'font-bold'
-              }`}
-            >
-              {item.title}
-            </span>
-          </div>
+        <div className="flex-1 min-w-0 text-sm leading-snug [overflow-wrap:anywhere]">
+          <span
+            className={
+              item.completed
+                ? 'line-through text-gray-400'
+                : 'font-bold'
+            }
+          >
+            {item.title}
+          </span>
 
           {item.section && (
-            <span className="text-[10px] uppercase font-bold text-fuchsia-700">
+            <span className="ml-2 text-[10px] uppercase font-bold text-fuchsia-700">
               {item.section}
+            </span>
+          )}
+
+          {shopping && item.completed && (
+            <span className="ml-1 text-xs text-gray-400">
+              ×{item.quantity || 1}
             </span>
           )}
         </div>
 
         {shopping && !item.completed && (
-          <div className="flex items-center border bg-white">
+          <div className="shrink-0 flex items-center border bg-white rounded">
             <button
+              type="button"
               disabled={busy}
               onClick={() => changeQuantity(-1)}
-              aria-label="Decrease quantity"
-              className="min-w-[30px] min-h-[36px] flex items-center justify-center"
+              title="Decrease quantity"
+              aria-label={`Decrease quantity: ${item.title}`}
+              className="w-7 h-8 inline-flex items-center justify-center hover:bg-gray-100 disabled:opacity-50"
             >
               <Minus className="w-3 h-3" />
             </button>
 
-            <span className="text-xs font-bold">
+            <span className="min-w-[1ch] text-center text-xs font-bold">
               {item.quantity || 1}
             </span>
 
             <button
+              type="button"
               disabled={busy}
               onClick={() => changeQuantity(1)}
-              aria-label="Increase quantity"
-              className="min-w-[30px] min-h-[36px] flex items-center justify-center"
+              title="Increase quantity"
+              aria-label={`Increase quantity: ${item.title}`}
+              className="w-7 h-8 inline-flex items-center justify-center hover:bg-gray-100 disabled:opacity-50"
             >
               <Plus className="w-3 h-3" />
             </button>
           </div>
         )}
 
+        <PhotoAttachment
+          item={item}
+          collectionName={collectionName}
+          now={now}
+          disabled={busy}
+        />
+
         <button
+          type="button"
           disabled={busy}
           onClick={remove}
-          aria-label="Delete item"
-          className="shrink-0 p-2 text-red-600"
+          title="Delete item"
+          aria-label={`Delete item: ${item.title}`}
+          className={`${ICON_BUTTON_CLASS} text-red-600`}
         >
           <Trash2 className="w-4 h-4" />
         </button>
       </div>
-
-      <PhotoAttachment
-        item={item}
-        collectionName={collectionName}
-        now={now}
-      />
 
       <ErrorNotice message={error} />
     </div>
@@ -1546,7 +1704,10 @@ function MorningToDoView({ user, tasks, now }) {
             Completed ({completed.length})
           </h3>
 
-          <TaskList items={completed} now={now} />
+          <TaskList
+            items={completed}
+            now={now}
+          />
         </section>
       )}
     </div>
@@ -1591,7 +1752,10 @@ function HouseholdToDoView({ user, tasks, now }) {
           );
 
           return (
-            <section key={room} className={PANEL_CLASS}>
+            <section
+              key={room}
+              className={PANEL_CLASS}
+            >
               <h3 className="text-sm font-black uppercase border-b pb-2">
                 {room} ({roomTasks.length})
               </h3>
@@ -1613,9 +1777,11 @@ function HouseholdToDoView({ user, tasks, now }) {
         >
           Completed Tasks ({completed.length})
 
-          {expanded
-            ? <ChevronUp className="w-5 h-5" />
-            : <ChevronDown className="w-5 h-5" />}
+          {expanded ? (
+            <ChevronUp className="w-5 h-5" />
+          ) : (
+            <ChevronDown className="w-5 h-5" />
+          )}
         </button>
 
         {expanded && (
@@ -1656,11 +1822,12 @@ function PersonalToDoView({
   setOwner
 }) {
   const items = useMemo(
-    () => tasks.filter(
-      item =>
-        item.scope === 'personal' &&
-        item.owner === owner
-    ),
+    () =>
+      tasks.filter(
+        item =>
+          item.scope === 'personal' &&
+          item.owner === owner
+      ),
     [tasks, owner]
   );
 
@@ -1702,7 +1869,10 @@ function PersonalToDoView({
           {owner}'s Pending Tasks ({active.length})
         </h3>
 
-        <TaskList items={active} now={now} />
+        <TaskList
+          items={active}
+          now={now}
+        />
       </section>
 
       {completed.length > 0 && (
@@ -1711,7 +1881,10 @@ function PersonalToDoView({
             Completed ({completed.length})
           </h3>
 
-          <TaskList items={completed} now={now} />
+          <TaskList
+            items={completed}
+            now={now}
+          />
         </section>
       )}
     </div>
@@ -1727,8 +1900,9 @@ function CalendarView({ user, tasks, now }) {
   const [deletingId, setDeletingId] = useState(null);
   const [error, setError] = useState('');
   const [showPast, setShowPast] = useState(false);
-  const [today, setToday] = useState(() =>
-    dateKey(new Date())
+
+  const [today, setToday] = useState(
+    () => dateKey(new Date())
   );
 
   useEffect(() => {
@@ -1761,49 +1935,45 @@ function CalendarView({ user, tasks, now }) {
     refresh();
 
     window.addEventListener('focus', refresh);
-    document.addEventListener(
-      'visibilitychange',
-      visible
-    );
+    document.addEventListener('visibilitychange', visible);
 
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener('focus', refresh);
-      document.removeEventListener(
-        'visibilitychange',
-        visible
-      );
+      document.removeEventListener('visibilitychange', visible);
     };
   }, []);
 
   const pastStart = useMemo(() => {
     const [year, month, day] = today.split('-').map(Number);
 
-    const lastDayOfPreviousMonth = new Date(
-      year,
-      month - 1,
-      0
-    ).getDate();
-
     return dateKey(
       new Date(
         year,
         month - 2,
-        Math.min(day, lastDayOfPreviousMonth)
+        Math.min(
+          day,
+          new Date(year, month - 1, 0).getDate()
+        )
       )
     );
   }, [today]);
 
   const items = useMemo(
-    () => tasks
-      .filter(
-        item =>
-          !item.completed &&
-          typeof item.dueDate === 'string' &&
-          /^\d{4}-\d{2}-\d{2}$/.test(item.dueDate) &&
-          item.dueDate >= (showPast ? pastStart : today)
-      )
-      .sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
+    () =>
+      tasks
+        .filter(
+          item =>
+            !item.completed &&
+            typeof item.dueDate === 'string' &&
+            /^\d{4}-\d{2}-\d{2}$/.test(item.dueDate) &&
+            item.dueDate >= (
+              showPast ? pastStart : today
+            )
+        )
+        .sort((a, b) =>
+          a.dueDate.localeCompare(b.dueDate)
+        ),
     [tasks, showPast, pastStart, today]
   );
 
@@ -1936,6 +2106,14 @@ function CalendarView({ user, tasks, now }) {
             />
           </label>
 
+          <PhotoPicker
+            photo={photo}
+            onChange={setPhoto}
+            processing={processing}
+            onProcessing={setProcessing}
+            disabled={saving}
+          />
+
           <button
             type="submit"
             disabled={
@@ -1949,14 +2127,6 @@ function CalendarView({ user, tasks, now }) {
             {saving ? 'Saving...' : '+ Add event'}
           </button>
         </div>
-
-        <PhotoPicker
-          photo={photo}
-          onChange={setPhoto}
-          processing={processing}
-          onProcessing={setProcessing}
-          disabled={saving}
-        />
       </form>
 
       <ErrorNotice message={error} />
@@ -1969,6 +2139,7 @@ function CalendarView({ user, tasks, now }) {
             onChange={e => setShowPast(e.target.checked)}
             className="w-4 h-4 accent-fuchsia-600"
           />
+
           Show past events
         </label>
 
@@ -1990,54 +2161,52 @@ function CalendarView({ user, tasks, now }) {
           {items.map(item => (
             <article
               key={item.id}
-              className="p-3 border border-gray-200 bg-gray-50 space-y-2"
+              className="px-2 py-1 border border-gray-200 bg-gray-50 flex items-center gap-1.5"
             >
-              <div className="flex items-start gap-2">
-                <AuthorBadge
-                  author={
-                    item.author ||
-                    item.owner?.charAt(0) ||
-                    'H'
-                  }
-                />
+              <AuthorBadge
+                author={
+                  item.author ||
+                  item.owner?.charAt(0) ||
+                  'H'
+                }
+              />
 
-                <div className="flex-1 min-w-0">
-                  <h3 className="text-sm font-black break-words">
-                    {item.title}
-                  </h3>
+              <div className="flex-1 min-w-0 text-sm leading-snug [overflow-wrap:anywhere]">
+                <h3 className="inline font-bold">
+                  {item.title}
+                </h3>
+                {' '}
 
-                  <p className="text-xs text-gray-500">
-                    <time dateTime={item.dueDate}>
-                      {item.dueDate}
-                    </time>
-
-                    {' · '}
-                    {relativeDay(item.dueDate)}
-                    {' · '}
-
-                    {item.scope === 'calendar'
-                      ? 'Event'
-                      : 'Existing dated task'}
-                  </p>
-                </div>
-
-                {item.scope === 'calendar' && (
-                  <button
-                    disabled={Boolean(deletingId)}
-                    onClick={() => remove(item)}
-                    aria-label="Delete event"
-                    className="p-2 text-red-600"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                )}
+                <span className="text-xs text-gray-500">
+                  <time dateTime={item.dueDate}>
+                    {item.dueDate}
+                  </time>
+                  {' · '}
+                  {relativeDay(item.dueDate)}
+                  {item.scope !== 'calendar' &&
+                    ' · Existing dated task'}
+                </span>
               </div>
 
               <PhotoAttachment
                 item={item}
                 collectionName="tasks"
                 now={now}
+                disabled={Boolean(deletingId)}
               />
+
+              {item.scope === 'calendar' && (
+                <button
+                  type="button"
+                  disabled={Boolean(deletingId)}
+                  onClick={() => remove(item)}
+                  title="Delete event"
+                  aria-label={`Delete event: ${item.title}`}
+                  className={`${ICON_BUTTON_CLASS} text-red-600`}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              )}
             </article>
           ))}
         </div>
@@ -2047,6 +2216,8 @@ function CalendarView({ user, tasks, now }) {
 }
 
 function ShoppingView({ listType, items, now }) {
+  const storeGroupName = useId();
+
   const [title, setTitle] = useState('');
   const [store, setStore] = useState('Prisma');
   const [quantity, setQuantity] = useState(1);
@@ -2119,15 +2290,40 @@ function ShoppingView({ listType, items, now }) {
 
           <div className="flex flex-wrap items-center gap-2">
             {grocery && (
-              <select
-                value={store}
-                onChange={e => setStore(e.target.value)}
+              <fieldset
                 disabled={saving}
-                className={INPUT_CLASS}
+                className="flex gap-1"
               >
-                <option>Prisma</option>
-                <option>Lidl</option>
-              </select>
+                <legend className="sr-only">
+                  Grocery store
+                </legend>
+
+                {['Prisma', 'Lidl'].map(name => (
+                  <label
+                    key={name}
+                    className={`min-h-[44px] px-3 inline-flex items-center gap-2 border text-xs font-bold cursor-pointer ${
+                      store === name
+                        ? 'border-fuchsia-400 bg-fuchsia-50 text-fuchsia-800'
+                        : 'border-gray-300 bg-gray-50'
+                    } ${
+                      saving
+                        ? 'opacity-50 cursor-not-allowed'
+                        : ''
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name={storeGroupName}
+                      value={name}
+                      checked={store === name}
+                      onChange={e => setStore(e.target.value)}
+                      className="w-4 h-4 accent-fuchsia-600"
+                    />
+
+                    {name}
+                  </label>
+                ))}
+              </fieldset>
             )}
 
             <div className="flex items-center border bg-gray-50">
@@ -2137,6 +2333,7 @@ function ShoppingView({ listType, items, now }) {
                 onClick={() =>
                   setQuantity(value => Math.max(1, value - 1))
                 }
+                aria-label="Decrease quantity"
                 className="min-w-[36px] min-h-[44px]"
               >
                 -
@@ -2149,12 +2346,23 @@ function ShoppingView({ listType, items, now }) {
               <button
                 type="button"
                 disabled={saving}
-                onClick={() => setQuantity(value => value + 1)}
+                onClick={() =>
+                  setQuantity(value => value + 1)
+                }
+                aria-label="Increase quantity"
                 className="min-w-[36px] min-h-[44px]"
               >
                 +
               </button>
             </div>
+
+            <PhotoPicker
+              photo={photo}
+              onChange={setPhoto}
+              processing={processing}
+              onProcessing={setProcessing}
+              disabled={saving}
+            />
 
             <button
               type="submit"
@@ -2165,14 +2373,6 @@ function ShoppingView({ listType, items, now }) {
             </button>
           </div>
         </div>
-
-        <PhotoPicker
-          photo={photo}
-          onChange={setPhoto}
-          processing={processing}
-          onProcessing={setProcessing}
-          disabled={saving}
-        />
 
         {grocery && (
           <SmartPills
@@ -2185,11 +2385,13 @@ function ShoppingView({ listType, items, now }) {
         <ErrorNotice message={error} />
       </form>
 
-      <div className={
-        grocery
-          ? 'grid md:grid-cols-2 gap-4'
-          : 'space-y-4'
-      }>
+      <div
+        className={
+          grocery
+            ? 'grid md:grid-cols-2 gap-4'
+            : 'space-y-4'
+        }
+      >
         {groups.map(group => {
           const groupItems = grocery
             ? list.filter(item => item.storeSection === group)
@@ -2204,7 +2406,10 @@ function ShoppingView({ listType, items, now }) {
           );
 
           return (
-            <section key={group} className={PANEL_CLASS}>
+            <section
+              key={group}
+              className={PANEL_CLASS}
+            >
               <h3 className="text-sm font-black uppercase border-b pb-2">
                 {group} ({active.length})
               </h3>
@@ -2247,42 +2452,5 @@ function ShoppingView({ listType, items, now }) {
         })}
       </div>
     </div>
-  );
-}
-
-function AdminPanelView() {
-  return (
-    <section className={PANEL_CLASS}>
-      <h2 className="text-lg font-black uppercase">
-        Household Access
-      </h2>
-
-      <p className="text-sm text-gray-600">
-        Access is controlled by the two email addresses
-        in your deployed Firestore rules. The old whitelist
-        form could not grant access under those rules.
-      </p>
-
-      {AUTHORIZED_EMAILS.map(email => (
-        <div
-          key={email}
-          className="p-3 bg-emerald-50 border border-emerald-200 text-sm font-bold break-all"
-        >
-          {email}
-
-          {email === PRIMARY_ADMIN_EMAIL && (
-            <span className="block text-xs font-normal">
-              Primary administrator
-            </span>
-          )}
-        </div>
-      ))}
-
-      <p className="text-xs text-gray-500">
-        To change household access, update both the Firebase
-        rules and AUTHORIZED_EMAILS in this file.
-        No existing whitelist documents have been deleted.
-      </p>
-    </section>
   );
 }
