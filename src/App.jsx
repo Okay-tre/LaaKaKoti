@@ -491,21 +491,26 @@ function PhotoAttachment({ item, collectionName, now, disabled = false }) {
 // Reminder days are calendar days in the device's local timezone.
 // No notification permission, service worker or background service is needed.
 function hasReminder(item) {
-  return item.scope === 'calendar' && [1, 7].includes(item.reminderDays);
+  return ['calendar', 'morning', 'household', 'personal'].includes(item.scope) && [1, 7].includes(item.reminderDays);
+}
+
+function reminderTargetDate(item) {
+  return item.scope === 'calendar' ? item.dueDate : item.reminderDate;
 }
 
 function reminderStartDate(item) {
-  if (!hasReminder(item) || typeof item.dueDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(item.dueDate)) return null;
-  const [year, month, day] = item.dueDate.split('-').map(Number);
+  const target = reminderTargetDate(item);
+  if (!hasReminder(item) || typeof target !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(target)) return null;
+  const [year, month, day] = target.split('-').map(Number);
   const date = new Date(year, month - 1, day, 12);
-  if (dateKey(date) !== item.dueDate) return null;
+  if (dateKey(date) !== target) return null;
   date.setDate(date.getDate() - item.reminderDays);
   return dateKey(date);
 }
 
 function reminderIsDue(item, today) {
   const starts = reminderStartDate(item);
-  return Boolean(starts && starts <= today && !item.reminderDone && !item.completed);
+  return Boolean(starts && starts <= today && !item.completed && (item.scope !== 'calendar' || !item.reminderDone));
 }
 
 function reminderLabel(days) {
@@ -513,6 +518,8 @@ function reminderLabel(days) {
 }
 
 function ReminderCheckbox({ item, onError, disabled = false }) {
+  const calendarEvent = item.scope === 'calendar';
+  const checked = calendarEvent ? Boolean(item.reminderDone) : Boolean(item.completed);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const change = async event => {
@@ -522,10 +529,14 @@ function ReminderCheckbox({ item, onError, disabled = false }) {
     setSaving(true);
     onError('');
     try {
-      // Keep the event visible: reminder completion is NOT task completion.
-      await updateDoc(doc(db, 'tasks', item.id), {
+      // To-do reminders use the task's existing completion state.
+      // Calendar reminder completion still leaves the event visible.
+      await updateDoc(doc(db, 'tasks', item.id), calendarEvent ? {
         reminderDone: done,
         reminderDoneAt: done ? serverTimestamp() : null
+      } : {
+        completed: done,
+        completedAt: done ? serverTimestamp() : null
       });
     } catch (err) {
       onError(errorText(err));
@@ -536,18 +547,18 @@ function ReminderCheckbox({ item, onError, disabled = false }) {
   };
   return (
     <label
-      title={item.reminderDone ? 'Reminder done. Uncheck to enable it again.' : 'Mark reminder done for both household users'}
+      title={checked ? 'Done. Uncheck to enable it again.' : calendarEvent ? 'Mark reminder done for both household users' : 'Mark this task completed for both household users'}
       className={`shrink-0 min-h-[32px] inline-flex items-center gap-1.5 text-xs font-bold ${saving || disabled ? 'opacity-50' : 'cursor-pointer'}`}
     >
       <input
         type="checkbox"
-        checked={Boolean(item.reminderDone)}
+        checked={checked}
         onChange={change}
         disabled={saving || disabled}
-        aria-label={`Reminder done: ${item.title}`}
+        aria-label={`${calendarEvent ? 'Reminder' : 'Task'} done: ${item.title}`}
         className="w-4 h-4 accent-fuchsia-600"
       />
-      <span className="sr-only">Reminder </span>Done
+      <span className="sr-only">{calendarEvent ? 'Reminder ' : 'Task '}</span>Done
     </label>
   );
 }
@@ -576,7 +587,7 @@ function ReminderToasts({ tasks, now }) {
 
   const due = useMemo(() => tasks
     .filter(item => reminderIsDue(item, today))
-    .sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.id.localeCompare(b.id)), [tasks, today]);
+    .sort((a, b) => reminderTargetDate(a).localeCompare(reminderTargetDate(b)) || a.id.localeCompare(b.id)), [tasks, today]);
   const visible = due.filter(item => !dismissed.has(item.id));
   const dismiss = id => setDismissed(previous => new Set([...previous, id]));
   const dismissAll = () => {
@@ -587,19 +598,20 @@ function ReminderToasts({ tasks, now }) {
   if (!visible.length && !error) return null;
 
   return (
-    <aside aria-label="Calendar reminders" className="fixed bottom-16 md:bottom-4 right-3 z-50 w-[calc(100vw-1.5rem)] max-w-sm rounded-lg border border-fuchsia-200 bg-white text-[#1F2937] shadow-xl">
+    <aside aria-label="Task and calendar reminders" className="fixed bottom-16 md:bottom-4 right-3 z-50 w-[calc(100vw-1.5rem)] max-w-sm rounded-lg border border-fuchsia-200 bg-white text-[#1F2937] shadow-xl">
       <div className="flex items-center gap-2 px-3 py-2 border-b border-fuchsia-100">
         <Bell className="w-4 h-4 text-fuchsia-600" />
         <h2 className="flex-1 text-sm font-bold">Reminders ({visible.length})</h2>
         <button type="button" onClick={dismissAll} title="Dismiss reminders for now" aria-label="Dismiss reminders for now" className={ICON_BUTTON_CLASS}><X className="w-4 h-4" /></button>
       </div>
-      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{visible.length} calendar reminder{visible.length === 1 ? '' : 's'} need attention.</p>
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{visible.length} reminder{visible.length === 1 ? '' : 's'} need attention.</p>
       <div className="max-h-[35vh] overflow-y-auto overscroll-contain p-3 space-y-3">
         {visible.map(item => (
           <div key={item.id} className="flex items-start gap-2">
             <div className="flex-1 min-w-0">
               <p className="text-sm font-bold [overflow-wrap:anywhere]">{item.title}</p>
-              <p className="text-xs text-gray-500"><time dateTime={item.dueDate}>{item.dueDate}</time> · {item.dueDate < today ? 'Past event — still pending' : item.dueDate === today ? 'Today' : 'Upcoming'}</p>
+              <p className="text-xs text-gray-500"><time dateTime={reminderTargetDate(item)}>{reminderTargetDate(item)}</time> · {reminderTargetDate(item) < today ? 'Past date — still pending' : reminderTargetDate(item) === today ? 'Today' : 'Upcoming'}</p>
+              <p className="text-[11px] text-fuchsia-700">{item.scope === 'calendar' ? 'Calendar' : item.scope === 'personal' ? `Personal · ${item.owner || 'Shared'}` : item.scope === 'household' ? `Household · ${item.section || 'Shared'}` : 'Morning'}</p>
               <ReminderCheckbox item={item} onError={setError} />
             </div>
             <button type="button" onClick={() => dismiss(item.id)} title="Dismiss for now" aria-label={`Dismiss reminder for now: ${item.title}`} className={ICON_BUTTON_CLASS}><X className="w-4 h-4" /></button>
@@ -764,6 +776,8 @@ export default function App() {
 
 function TaskForm({ user, scope, owner = null, items }) {
   const [title, setTitle] = useState('');
+  const [notifyDays, setNotifyDays] = useState('');
+  const [reminderDate, setReminderDate] = useState('');
   const [section, setSection] = useState('Kitchen');
   const [photo, setPhoto] = useState(null);
   const [processing, setProcessing] = useState(false);
@@ -772,25 +786,38 @@ function TaskForm({ user, scope, owner = null, items }) {
   const suggestions = useFrequentSuggestions(items, title);
   const save = async event => {
     event.preventDefault();
-    if (!title.trim() || saving || processing) return;
+    if (!title.trim() || saving || processing || (notifyDays && !reminderDate)) return;
     setSaving(true); setError('');
     try {
+      const reminder = ['1', '7'].includes(notifyDays)
+        ? { reminderDays: Number(notifyDays), reminderDate }
+        : {};
       await createItem('tasks', {
         scope, owner, author: authorInitial(user), title: title.trim(),
         section: scope === 'household' ? section : null,
-        completed: false, completedAt: null
+        completed: false, completedAt: null, ...reminder
       }, photo);
-      setTitle(''); setPhoto(null);
+      setTitle(''); setPhoto(null); setNotifyDays(''); setReminderDate('');
     } catch (err) { setError(errorText(err)); }
     finally { setSaving(false); }
   };
   return (
     <form onSubmit={save} className={PANEL_CLASS}>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-end gap-2">
         <input value={title} onChange={e => setTitle(e.target.value)} required disabled={saving} placeholder={scope === 'personal' ? `Add personal task for ${owner}...` : scope === 'morning' ? 'Add morning task...' : 'Write a quick task...'} className={`${INPUT_CLASS} flex-1 min-w-[140px] max-w-full`} />
         {scope === 'household' && <select value={section} onChange={e => setSection(e.target.value)} disabled={saving} className={INPUT_CLASS}>{ROOMS.map(room => <option key={room}>{room}</option>)}</select>}
+        <label className="text-xs font-bold">Notify me
+          <select value={notifyDays} onChange={e => setNotifyDays(e.target.value)} disabled={saving} className={`${INPUT_CLASS} block w-full mt-1`}>
+            <option value="">-</option>
+            <option value="1">1 day before</option>
+            <option value="7">1 week before</option>
+          </select>
+        </label>
+        {notifyDays && <label className="text-xs font-bold">Task date
+          <input type="date" value={reminderDate} onChange={e => setReminderDate(e.target.value)} required disabled={saving} className={`${INPUT_CLASS} block w-full mt-1`} />
+        </label>}
         <PhotoPicker photo={photo} onChange={setPhoto} processing={processing} onProcessing={setProcessing} disabled={saving} />
-        <button type="submit" disabled={saving || processing || !title.trim()} className={BUTTON_CLASS}>{saving ? 'Saving...' : '+ Add task'}</button>
+        <button type="submit" disabled={saving || processing || !title.trim() || Boolean(notifyDays && !reminderDate)} className={BUTTON_CLASS}>{saving ? 'Saving...' : '+ Add task'}</button>
       </div>
       {scope !== 'personal' && <SmartPills suggestions={suggestions} onSelect={setTitle} disabled={saving} />}
       <ErrorNotice message={error} />
@@ -829,6 +856,7 @@ function ItemRow({ item, collectionName, now, shopping = false }) {
         <div className="flex-1 min-w-0 text-sm leading-snug [overflow-wrap:anywhere]">
           <span className={item.completed ? 'line-through text-gray-400' : 'font-bold'}>{item.title}</span>
           {item.section && <span className="ml-2 text-[10px] uppercase font-bold text-fuchsia-700">{item.section}</span>}
+          {!shopping && hasReminder(item) && <span className="ml-2 text-[10px] font-bold text-fuchsia-700"><time dateTime={item.reminderDate}>{item.reminderDate}</time> · {reminderLabel(item.reminderDays)}</span>}
           {shopping && item.completed && <span className="ml-1 text-xs text-gray-400">×{item.quantity || 1}</span>}
         </div>
         {shopping && !item.completed && <div className="shrink-0 flex items-center border bg-white rounded"><button type="button" disabled={busy} onClick={() => changeQuantity(-1)} title="Decrease quantity" aria-label={`Decrease quantity: ${item.title}`} className="w-7 h-8 inline-flex items-center justify-center hover:bg-gray-100 disabled:opacity-50"><Minus className="w-3 h-3" /></button><span className="min-w-[1ch] text-center text-xs font-bold">{item.quantity || 1}</span><button type="button" disabled={busy} onClick={() => changeQuantity(1)} title="Increase quantity" aria-label={`Increase quantity: ${item.title}`} className="w-7 h-8 inline-flex items-center justify-center hover:bg-gray-100 disabled:opacity-50"><Plus className="w-3 h-3" /></button></div>}
