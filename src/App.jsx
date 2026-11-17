@@ -1248,10 +1248,6 @@ export default function App() {
                   className="h-10 sm:h-12 w-auto max-w-[65vw] sm:max-w-[280px] object-contain"
                 />
               </h1>
-
-              <p className="text-[10px] font-bold uppercase tracking-widest text-fuchsia-100">
-                Household Hub
-              </p>
             </div>
 
             <div className="flex items-center gap-2">
