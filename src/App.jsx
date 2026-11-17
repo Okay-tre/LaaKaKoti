@@ -1161,9 +1161,14 @@ export default function App() {
     return (
       <div className="min-h-screen bg-[#F4F5F8] flex items-center justify-center p-4">
         <div className={`${PANEL_CLASS} max-w-md w-full text-center`}>
-          <h1 className="text-3xl font-black text-[#D946EF]">
-            CHAOS CONTROL
+          <h1>
+            <img
+              src={`${import.meta.env.BASE_URL}cc-logo.png`}
+              alt="CHAOS CONTROL"
+              className="h-20 w-auto max-w-full object-contain mx-auto"
+            />
           </h1>
+
 
           {user ? (
             <>
@@ -1236,8 +1241,12 @@ export default function App() {
         <div className="max-w-5xl mx-auto px-4 pt-3 pb-2">
           <div className="flex justify-between items-center gap-3 mb-3">
             <div>
-              <h1 className="text-2xl font-black uppercase leading-none">
-                CHAOS CONTROL
+              <h1>
+                <img
+                  src={`${import.meta.env.BASE_URL}cc-logo.png`}
+                  alt="CHAOS CONTROL"
+                  className="h-10 sm:h-12 w-auto max-w-[65vw] sm:max-w-[280px] object-contain"
+                />
               </h1>
 
               <p className="text-[10px] font-bold uppercase tracking-widest text-fuchsia-100">
