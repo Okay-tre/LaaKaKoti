@@ -1238,39 +1238,26 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#F4F5F8] text-[#1F2937] font-sans pb-24 md:pb-6">
       <header className="bg-[#D946EF] text-white sticky top-0 z-30 shadow-md">
-        <div className="max-w-5xl mx-auto px-4 pt-3 pb-2">
-          <div className="flex justify-between items-center gap-3 mb-3">
-            <div>
-              <h1>
-                <img
-                  src={`${import.meta.env.BASE_URL}cc-logo.png`}
-                  alt="CHAOS CONTROL"
-                  className="h-10 sm:h-12 w-auto max-w-[65vw] sm:max-w-[280px] object-contain"
-                />
-              </h1>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="hidden sm:block text-xs font-bold">
-                {user.displayName || user.email}
-              </span>
-
-              <button
-                onClick={logout}
-                title="Sign out"
-                className="p-2 border border-white/30"
-              >
-                <LogOut className="w-5 h-5" />
-              </button>
-            </div>
-          </div>
-
-          <nav className="hidden md:flex gap-1 overflow-x-auto">
+        <div className="max-w-7xl mx-auto px-4 py-2 flex flex-nowrap items-center gap-3">
+          <h1 className="shrink-0">
+            <img
+              src={`${import.meta.env.BASE_URL}cc-logo.png`}
+              alt="CHAOS CONTROL"
+              className="h-10 w-auto max-w-[120px] object-contain"
+            />
+          </h1>
+      
+          <nav
+            aria-label="Main navigation"
+            className="hidden md:flex flex-1 min-w-0 flex-nowrap items-center gap-1 overflow-x-auto"
+          >
             {tabs.map(tab => (
               <button
                 key={tab.id}
+                type="button"
                 onClick={() => setActiveTab(tab.id)}
-                className={`px-3 py-2 text-xs font-black uppercase whitespace-nowrap ${
+                aria-current={activeTab === tab.id ? 'page' : undefined}
+                className={`shrink-0 min-h-[40px] px-2.5 lg:px-3 text-[11px] lg:text-xs font-black uppercase whitespace-nowrap ${
                   activeTab === tab.id
                     ? 'bg-white text-fuchsia-600'
                     : 'hover:bg-fuchsia-600'
@@ -1280,8 +1267,28 @@ export default function App() {
               </button>
             ))}
           </nav>
+      
+          <div className="ml-auto shrink-0 flex items-center gap-2">
+            <span
+              title={user.displayName || user.email}
+              className="hidden sm:block md:hidden xl:block max-w-[96px] truncate text-xs font-bold"
+            >
+              {user.displayName || user.email}
+            </span>
+      
+            <button
+              type="button"
+              onClick={logout}
+              title="Sign out"
+              aria-label="Sign out"
+              className="w-10 h-10 shrink-0 inline-flex items-center justify-center border border-white/30 hover:bg-fuchsia-600"
+            >
+              <LogOut className="w-5 h-5" />
+            </button>
+          </div>
         </div>
       </header>
+
 
       <main className="max-w-5xl mx-auto px-4 py-4 space-y-3">
         <ErrorNotice message={error} />
