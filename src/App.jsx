@@ -3,13 +3,13 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import {
   getFirestore, collection, doc, getDoc, getDocs, onSnapshot,
-  updateDoc, writeBatch, runTransaction, serverTimestamp,
+  updateDoc, writeBatch, runTransaction, serverTimestamp, setDoc, addDoc,
   deleteField, query, where, orderBy, limit, Timestamp
 } from 'firebase/firestore';
 import {
   Check, Plus, Trash2, Camera, LogOut, User, Home,
   ShoppingCart, ShieldAlert, ChevronDown, ChevronUp,
-  Minus, Calendar, Image as ImageIcon, Sun, X, Loader2, Bell
+  Minus, Calendar, Image as ImageIcon, Sun, X, Loader2, Bell, Sparkles, Key
 } from 'lucide-react';
 
 const firebaseConfig = {
@@ -27,6 +27,7 @@ const db = getFirestore(app);
 
 // Keep these aligned with the two email addresses in your Firestore rules.
 const AUTHORIZED_EMAILS = ['patteri6907@gmail.com', 'laakkjiii@gmail.com'];
+const PRIMARY_ADMIN_EMAIL = 'patteri6907@gmail.com';
 const ROOMS = ['Kitchen', 'Living room', 'Kids room', 'Bathroom', 'Parents room'];
 const PHOTO_LIFETIME = 14 * 24 * 60 * 60 * 1000;
 const PHOTO_TARGET_BYTES = 220 * 1024;
@@ -235,15 +236,23 @@ async function deleteItem(collectionName, itemId) {
 }
 
 async function toggleItem(collectionName, item) {
+  const nextCompleted = !item.completed;
   await updateDoc(doc(db, collectionName, item.id), {
-    completed: !item.completed,
-    completedAt: !item.completed ? serverTimestamp() : null
+    completed: nextCompleted,
+    completedAt: nextCompleted ? serverTimestamp() : null
   });
+  if (collectionName === 'shopping_items' && item.listType === 'grocery' && nextCompleted && item.title?.trim()) {
+    await addDoc(collection(db, 'grocery_history'), {
+      title: item.title.trim(),
+      store: item.storeSection || 'Prisma',
+      quantity: Number(item.quantity) || 1,
+      boughtAt: serverTimestamp()
+    });
+  }
 }
 
 async function cleanupExpiredPhotos() {
   const cutoff = Timestamp.fromMillis(Date.now() - PHOTO_LIFETIME);
-  // Read only expired attachments, in small batches. This is not Firestore TTL.
   for (;;) {
     const result = await getDocs(query(
       collection(db, 'attachments'),
@@ -261,7 +270,6 @@ async function cleanupExpiredPhotos() {
         const itemRef = validParent ? doc(db, data.itemCollection, data.itemId) : null;
         const item = itemRef ? await transaction.get(itemRef) : null;
         transaction.delete(candidate.ref);
-        // A replacement photo must never be cleared by cleanup of an older one.
         if (item?.exists() && item.data().imageAttachmentId === image.id) {
           transaction.update(itemRef, {
             imageAttachmentId: deleteField(),
@@ -312,7 +320,6 @@ function usePhotoCleanup(enabled) {
   return error;
 }
 
-// A photo opens over the page instead of making its list row taller.
 function PhotoDialog({ open, onClose, title, actions, children }) {
   const dialog = useRef(null);
   const titleId = useId();
@@ -471,7 +478,7 @@ function PhotoAttachment({ item, collectionName, now, disabled = false }) {
         {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : available ? <ImageIcon className="w-4 h-4" /> : <Camera className="w-4 h-4" />}
       </button>
       <PhotoDialog open={opened} onClose={() => setOpened(false)} title={item.title} actions={<>
-        <button type="button" disabled={busy || disabled} onClick={() => dialogInput.current?.click()} title={hasPhoto ? 'Replace photo' : 'Add photo'} aria-label={hasPhoto ? 'Replace photo' : 'Add photo'} className={`${ICON_BUTTON_CLASS} text-fuchsia-700`}>{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}</button>
+        <button type="button" disabled={busy || disabled} onClick={() => dialogInput.current?.click()} title={hasPhoto ? 'Replace photo' : 'Add photo'} aria-label={hasPhoto ? 'Replace photo' : 'Add photo'} className={`${ICON_BUTTON_CLASS} text-fuchsia-700`}>{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" /></button>
         {hasPhoto && <button type="button" disabled={busy || disabled} onClick={remove} title="Remove photo" aria-label="Remove photo" className={`${ICON_BUTTON_CLASS} text-red-600`}><Trash2 className="w-4 h-4" /></button>}
       </>}>
         <input ref={dialogInput} type="file" accept="image/*" onChange={choose} disabled={busy || disabled} className="hidden" />
@@ -488,8 +495,6 @@ function PhotoAttachment({ item, collectionName, now, disabled = false }) {
   );
 }
 
-// Reminder days are calendar days in the device's local timezone.
-// No notification permission, service worker or background service is needed.
 function hasReminder(item) {
   return ['calendar', 'morning', 'household', 'personal'].includes(item.scope) && [1, 7].includes(item.reminderDays);
 }
@@ -529,8 +534,6 @@ function ReminderCheckbox({ item, onError, disabled = false }) {
     setSaving(true);
     onError('');
     try {
-      // To-do reminders use the task's existing completion state.
-      // Calendar reminder completion still leaves the event visible.
       await updateDoc(doc(db, 'tasks', item.id), calendarEvent ? {
         reminderDone: done,
         reminderDoneAt: done ? serverTimestamp() : null
@@ -568,8 +571,6 @@ function ReminderToasts({ tasks, now }) {
   const [error, setError] = useState('');
   const today = dateKey(new Date(now));
 
-  // Dismissals are temporary, in memory only. Reloading starts fresh.
-  // Returning to the tab or restoring a cached page also shows due reminders.
   useEffect(() => {
     const reset = () => setDismissed(new Set());
     const visible = () => {
@@ -631,10 +632,13 @@ export default function App() {
   const [personalOwner, setPersonalOwner] = useState('Johanna');
   const [tasks, setTasks] = useState([]);
   const [shoppingItems, setShoppingItems] = useState([]);
+  const [groceryHistory, setGroceryHistory] = useState([]);
+  const [geminiApiKey, setGeminiApiKey] = useState('');
   const [error, setError] = useState('');
   const [now, setNow] = useState(Date.now());
   const email = user?.email?.toLowerCase() || '';
   const authorized = AUTHORIZED_EMAILS.includes(email);
+  const isAdmin = email === PRIMARY_ADMIN_EMAIL.toLowerCase();
   const cleanupError = usePhotoCleanup(Boolean(user && authorized));
 
   useEffect(() => onAuthStateChanged(auth, current => {
@@ -658,13 +662,25 @@ export default function App() {
   useEffect(() => {
     setTasks([]);
     setShoppingItems([]);
+    setGroceryHistory([]);
+    setGeminiApiKey('');
     setError('');
     if (!user || !authorized) return;
     const read = setter => snapshot => setter(snapshot.docs.map(item => ({ ...item.data(), id: item.id })));
     const failed = err => setError(errorText(err));
     const stopTasks = onSnapshot(collection(db, 'tasks'), read(setTasks), failed);
     const stopShopping = onSnapshot(collection(db, 'shopping_items'), read(setShoppingItems), failed);
-    return () => { stopTasks(); stopShopping(); };
+    const stopHistory = onSnapshot(
+      query(collection(db, 'grocery_history'), orderBy('boughtAt', 'desc'), limit(250)),
+      read(setGroceryHistory),
+      err => console.error('Grocery history read:', err)
+    );
+    const stopAiConfig = onSnapshot(
+      doc(db, 'settings', 'ai_config'),
+      snap => setGeminiApiKey(snap.exists() ? (snap.data().geminiApiKey || '') : ''),
+      err => console.error('AI config read:', err)
+    );
+    return () => { stopTasks(); stopShopping(); stopHistory(); stopAiConfig(); };
   }, [user, authorized]);
 
   const login = async () => {
@@ -703,7 +719,8 @@ export default function App() {
     { id: 'personal', label: 'Personal To-Do', short: 'Personal', Icon: User },
     { id: 'calendar', label: 'Calendar', short: 'Calendar', Icon: Calendar },
     { id: 'grocery', label: 'Grocery List', short: 'Grocery', Icon: ShoppingCart },
-    { id: 'other', label: 'Other Shopping', short: 'Other', Icon: ImageIcon }
+    { id: 'other', label: 'Other Shopping', short: 'Other', Icon: ImageIcon },
+    ...(isAdmin ? [{ id: 'admin', label: 'Admin', short: 'Admin', Icon: Key }] : [])
   ];
   return (
     <div className="min-h-screen bg-[#F4F5F8] text-[#1F2937] font-sans pb-24 md:pb-6">
@@ -763,8 +780,9 @@ export default function App() {
         {activeTab === 'household' && <HouseholdToDoView user={user} tasks={tasks} now={now} />}
         {activeTab === 'personal' && <PersonalToDoView user={user} tasks={tasks} now={now} owner={personalOwner} setOwner={setPersonalOwner} />}
         {activeTab === 'calendar' && <CalendarView user={user} tasks={tasks} now={now} />}
-        {activeTab === 'grocery' && <ShoppingView key="grocery" listType="grocery" items={shoppingItems} now={now} />}
+        {activeTab === 'grocery' && <ShoppingView key="grocery" listType="grocery" items={shoppingItems} groceryHistory={groceryHistory} geminiApiKey={geminiApiKey} now={now} />}
         {activeTab === 'other' && <ShoppingView key="other" listType="other" items={shoppingItems} now={now} />}
+        {activeTab === 'admin' && isAdmin && <AdminPanelView geminiApiKey={geminiApiKey} />}
       </main>
       <ReminderToasts key={user.uid} tasks={tasks} now={now} />
       <nav className="fixed bottom-0 inset-x-0 bg-[#D946EF] text-white flex md:hidden z-40 p-1">
@@ -1019,7 +1037,263 @@ function CalendarView({ user, tasks, now }) {
   );
 }
 
-function ShoppingView({ listType, items, now }) {
+function AdminPanelView({ geminiApiKey }) {
+  const [keyInput, setKeyInput] = useState(geminiApiKey || '');
+  const [saving, setSaving] = useState(false);
+  const [savedNotice, setSavedNotice] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setKeyInput(geminiApiKey || '');
+  }, [geminiApiKey]);
+
+  const handleSaveKey = async event => {
+    event.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setError('');
+    setSavedNotice(false);
+    try {
+      await setDoc(doc(db, 'settings', 'ai_config'), {
+        geminiApiKey: keyInput.trim(),
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      setSavedNotice(true);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <section className={PANEL_CLASS}>
+        <h2 className="text-lg font-black uppercase flex items-center gap-2">
+          <Key className="w-5 h-5 text-fuchsia-600" />
+          Admin &amp; Gemini API Settings
+        </h2>
+        <p className="text-xs text-gray-600">
+          Store your Google Gemini API key here. It is saved in Firestore (<code className="bg-gray-100 px-1">settings/ai_config</code>) so both authorized household accounts can use the AI grocery offer &amp; habit advisor without exposing the key in GitHub.
+        </p>
+
+        <form onSubmit={handleSaveKey} className="space-y-3 pt-1">
+          <label className="block text-xs font-bold">
+            Gemini API Key (AIza...)
+            <input
+              type="password"
+              value={keyInput}
+              onChange={e => setKeyInput(e.target.value)}
+              placeholder="Paste your Gemini API key here"
+              disabled={saving}
+              className={`${INPUT_CLASS} block w-full mt-1`}
+            />
+          </label>
+          <div className="flex items-center gap-3">
+            <button type="submit" disabled={saving} className={BUTTON_CLASS}>
+              {saving ? 'Saving...' : 'Save API Key'}
+            </button>
+            {savedNotice && <span className="text-xs font-bold text-emerald-700">Saved! AI suggestions are ready in Grocery List.</span>}
+          </div>
+          <ErrorNotice message={error} />
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function GroceryAiAdvisor({ groceryHistory, activeGroceryItems, geminiApiKey, onAddItem }) {
+  const [suggestions, setSuggestions] = useState([]);
+  const [addedIds, setAddedIds] = useState(() => new Set());
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const habitSummary = useMemo(() => {
+    const grouped = new Map();
+    groceryHistory.forEach(entry => {
+      const rawTitle = entry.title?.trim();
+      if (!rawTitle) return;
+      const key = rawTitle.toLowerCase();
+      const ts = timeMillis(entry.boughtAt) || Date.now();
+      if (!grouped.has(key)) {
+        grouped.set(key, { title: rawTitle, count: 0, timestamps: [], stores: new Map() });
+      }
+      const record = grouped.get(key);
+      record.count += 1;
+      record.timestamps.push(ts);
+      const st = entry.store || 'Prisma';
+      record.stores.set(st, (record.stores.get(st) || 0) + 1);
+    });
+
+    const nowMs = Date.now();
+    return [...grouped.values()]
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 25)
+      .map(item => {
+        const sorted = [...item.timestamps].sort((a, b) => a - b);
+        const daysSinceLast = Math.max(0, Math.round((nowMs - sorted[sorted.length - 1]) / 86400000));
+        let avgDays = null;
+        if (sorted.length >= 2) {
+          const spanDays = (sorted[sorted.length - 1] - sorted[0]) / 86400000;
+          avgDays = Math.max(1, Math.round(spanDays / (sorted.length - 1)));
+        }
+        const preferredStore = [...item.stores.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 'Prisma';
+        return { title: item.title, count: item.count, avgDays, daysSinceLast, preferredStore };
+      });
+  }, [groceryHistory]);
+
+  const fetchSuggestions = async () => {
+    if (!geminiApiKey) {
+      setError('No Gemini API key configured yet. Add it in the Admin tab first.');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    setAddedIds(new Set());
+
+    const activeNames = activeGroceryItems.filter(i => !i.completed).map(i => i.title);
+    const todayStr = new Date().toLocaleDateString('fi-FI', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const statsText = habitSummary.length
+      ? habitSummary.map(h => `- ${h.title}: bought ${h.count}x, ${h.avgDays ? `avg every ${h.avgDays} days, ` : ''}last bought ${h.daysSinceLast} days ago (usually ${h.preferredStore})`).join('\n')
+      : 'No purchase history logged yet — focus on current Finnish seasonal produce and good weekly offers.';
+
+    const prompt = `You are a smart Finnish household grocery assistant in Tampere, Finland. Today is ${todayStr}.
+Use Google Search to check current weekly offers (tarjoukset) and good seasonal prices right now at Lidl Suomi, Prisma, K-Market, and K-Citymarket.
+
+Here is our household's grocery purchase frequency history:
+${statsText}
+
+Items ALREADY on our active grocery list (do NOT suggest duplicates of these):
+${activeNames.length ? activeNames.join(', ') : 'None'}
+
+Return 7 distinct, practical grocery item suggestions (between 5 and 10 items) combining:
+1) Items we buy frequently or are due to restock soon, AND/OR
+2) Items that currently have good seasonal prices or weekly discounts at Lidl, Prisma, K-Market, or K-Citymarket.
+
+Respond ONLY with a valid JSON array (no markdown fences, no extra text) where each object has:
+- "title": string (short item name in English or Finnish matching our style)
+- "store": string (must be one of: "Prisma", "Lidl", "K-Market", "K-Citymarket")
+- "quantity": number (default 1)
+- "habitReason": string (short note on purchase frequency, e.g. "Bought 6x · every ~5d" or "Seasonal staple")
+- "dealReason": string (short note on current offer or good seasonal price at that store)`;
+
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(geminiApiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            tools: [{ google_search: {} }]
+          })
+        }
+      );
+
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}));
+        throw new Error(errBody?.error?.message || `Gemini API error (${response.status})`);
+      }
+
+      const data = await response.json();
+      const rawText = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+      const jsonMatch = rawText.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) throw new Error('Could not parse AI suggestions. Please try again.');
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (!Array.isArray(parsed)) throw new Error('Unexpected response format from Gemini.');
+
+      setSuggestions(parsed.slice(0, 10).map((item, idx) => ({
+        id: `${Date.now()}-${idx}`,
+        title: String(item.title || '').trim(),
+        store: String(item.store || 'Prisma').trim(),
+        quantity: Math.max(1, Number(item.quantity) || 1),
+        habitReason: String(item.habitReason || '').trim(),
+        dealReason: String(item.dealReason || '').trim()
+      })).filter(i => i.title));
+    } catch (err) {
+      setError(err?.message || 'Failed to fetch AI deal suggestions.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAddSingle = async suggestion => {
+    if (addedIds.has(suggestion.id)) return;
+    const targetColumn = suggestion.store === 'Lidl' ? 'Lidl' : 'Prisma';
+    const displayTitle = ['Prisma', 'Lidl'].includes(suggestion.store)
+      ? suggestion.title
+      : `${suggestion.title} (${suggestion.store})`;
+    await onAddItem(displayTitle, targetColumn, suggestion.quantity);
+    setAddedIds(prev => new Set([...prev, suggestion.id]));
+  };
+
+  return (
+    <section className={PANEL_CLASS}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-xs font-black uppercase text-fuchsia-700 flex items-center gap-1.5">
+            <Sparkles className="w-4 h-4" />
+            Smart Deals &amp; Habit Suggestions
+          </h3>
+          <p className="text-[11px] text-gray-500">
+            Tracks {groceryHistory.length} logged grocery purchases &amp; checks Lidl, Prisma, K-Market &amp; Citymarket offers.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={fetchSuggestions}
+          disabled={loading}
+          className={`${BUTTON_CLASS} inline-flex items-center gap-1.5`}
+        >
+          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+          {loading ? 'Checking offers...' : 'Suggest 5–10 Items'}
+        </button>
+      </div>
+
+      <ErrorNotice message={error} />
+
+      {suggestions.length > 0 && (
+        <div className="grid sm:grid-cols-2 gap-2 pt-1">
+          {suggestions.map(item => {
+            const added = addedIds.has(item.id);
+            return (
+              <div key={item.id} className="p-2.5 bg-fuchsia-50/60 border border-fuchsia-200 flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="font-bold text-sm text-[#1F2937]">{item.title}</span>
+                    <span className="text-[10px] font-black uppercase px-1.5 py-0.5 bg-white border border-fuchsia-200 text-fuchsia-700">
+                      {item.store}
+                    </span>
+                  </div>
+                  {item.habitReason && (
+                    <p className="text-[11px] font-semibold text-gray-600 mt-0.5">📊 {item.habitReason}</p>
+                  )}
+                  {item.dealReason && (
+                    <p className="text-[11px] font-semibold text-emerald-700">🏷️ {item.dealReason}</p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  disabled={added}
+                  onClick={() => handleAddSingle(item)}
+                  className={`shrink-0 min-h-[36px] px-3 text-xs font-black uppercase border ${
+                    added
+                      ? 'bg-emerald-600 border-emerald-600 text-white cursor-default'
+                      : 'bg-white border-fuchsia-300 text-fuchsia-700 hover:bg-fuchsia-600 hover:text-white'
+                  }`}
+                >
+                  {added ? 'Added ✓' : '+ Add'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ShoppingView({ listType, items, groceryHistory = [], geminiApiKey = '', now }) {
   const storeGroupName = useId();
   const [title, setTitle] = useState('');
   const [store, setStore] = useState('Prisma');
@@ -1041,9 +1315,31 @@ function ShoppingView({ listType, items, now }) {
     } catch (err) { setError(errorText(err)); }
     finally { setSaving(false); }
   };
+  const addFromAi = async (itemTitle, targetStore, itemQty) => {
+    try {
+      await createItem('shopping_items', {
+        listType: 'grocery',
+        storeSection: targetStore,
+        title: itemTitle,
+        quantity: itemQty,
+        completed: false,
+        completedAt: null
+      }, null);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  };
   const groups = grocery ? ['Prisma', 'Lidl'] : ['General Items'];
   return (
     <div className="space-y-4">
+      {grocery && (
+        <GroceryAiAdvisor
+          groceryHistory={groceryHistory}
+          activeGroceryItems={list}
+          geminiApiKey={geminiApiKey}
+          onAddItem={addFromAi}
+        />
+      )}
       <form onSubmit={save} className={PANEL_CLASS}>
         <div className="flex flex-col sm:flex-row gap-2">
           <input value={title} onChange={e => setTitle(e.target.value)} required disabled={saving} placeholder={grocery ? 'e.g. Milk, Bananas...' : 'e.g. Batteries, Lightbulbs...'} className={`${INPUT_CLASS} flex-1 min-w-0`} />
@@ -1076,4 +1372,3 @@ function ShoppingView({ listType, items, now }) {
     </div>
   );
 }
-
