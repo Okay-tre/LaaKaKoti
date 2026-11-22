@@ -478,7 +478,7 @@ function PhotoAttachment({ item, collectionName, now, disabled = false }) {
         {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : available ? <ImageIcon className="w-4 h-4" /> : <Camera className="w-4 h-4" />}
       </button>
       <PhotoDialog open={opened} onClose={() => setOpened(false)} title={item.title} actions={<>
-        <button type="button" disabled={busy || disabled} onClick={() => dialogInput.current?.click()} title={hasPhoto ? 'Replace photo' : 'Add photo'} aria-label={hasPhoto ? 'Replace photo' : 'Add photo'} className={`${ICON_BUTTON_CLASS} text-fuchsia-700`}>{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" /></button>
+        <button type="button" disabled={busy || disabled} onClick={() => dialogInput.current?.click()} title={hasPhoto ? 'Replace photo' : 'Add photo'} aria-label={hasPhoto ? 'Replace photo' : 'Add photo'} className={`${ICON_BUTTON_CLASS} text-fuchsia-700`}>{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}</button>
         {hasPhoto && <button type="button" disabled={busy || disabled} onClick={remove} title="Remove photo" aria-label="Remove photo" className={`${ICON_BUTTON_CLASS} text-red-600`}><Trash2 className="w-4 h-4" /></button>}
       </>}>
         <input ref={dialogInput} type="file" accept="image/*" onChange={choose} disabled={busy || disabled} className="hidden" />
