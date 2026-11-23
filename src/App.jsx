@@ -1081,8 +1081,6 @@ function GroceryAiAdvisor({ groceryHistory, activeGroceryItems, onAddItem }) {
   const requestPending = useRef(false);
   const addingIds = useRef(new Set());
   const [adding, setAdding] = useState(() => new Set());
-  const [sources, setSources] = useState([]);
-  const [searchEntryPoint, setSearchEntryPoint] = useState('');
 
   const fetchSuggestions = async () => {
     if (requestPending.current || addingIds.current.size) return;
@@ -1090,8 +1088,6 @@ function GroceryAiAdvisor({ groceryHistory, activeGroceryItems, onAddItem }) {
     setLoading(true);
     setError('');
     setSuggestions([]);
-    setSources([]);
-    setSearchEntryPoint('');
     setAddedIds(new Set());
     try {
       // Send only the existing Firebase sign-in token to the Worker.
@@ -1099,11 +1095,6 @@ function GroceryAiAdvisor({ groceryHistory, activeGroceryItems, onAddItem }) {
       const data = await requestGrocerySuggestions();
       if (!Array.isArray(data?.suggestions)) throw new Error('AI returned an unexpected response.');
       setSuggestions(data.suggestions.map((item, idx) => ({ ...item, id: `${Date.now()}-${idx}` })));
-      setSources(Array.isArray(data.sources) ? data.sources.filter(source => {
-        try { const url = new URL(source.url); return url.protocol === 'https:' && !url.username && !url.password; }
-        catch { return false; }
-      }) : []);
-      setSearchEntryPoint(typeof data.searchEntryPoint === 'string' ? data.searchEntryPoint : '');
     } catch (err) {
       setError(err?.message || 'Could not get AI suggestions. Try again later.');
     } finally {
@@ -1143,10 +1134,10 @@ function GroceryAiAdvisor({ groceryHistory, activeGroceryItems, onAddItem }) {
         <div>
           <h3 className="text-xs font-black uppercase text-fuchsia-700 flex items-center gap-1.5">
             <Sparkles className="w-4 h-4" />
-            Smart Deals &amp; Habit Suggestions
+            Smart Restock Suggestions
           </h3>
           <p className="text-[11px] text-gray-500">
-            Uses up to {groceryHistory.length} recent logged purchases to suggest restocks and check Lidl, Prisma, K-Market &amp; Citymarket offers.
+            Uses up to {groceryHistory.length} recent logged purchases to suggest restocks, with general staples when history is limited.
           </p>
         </div>
         <button
@@ -1156,11 +1147,11 @@ function GroceryAiAdvisor({ groceryHistory, activeGroceryItems, onAddItem }) {
           className={`${BUTTON_CLASS} inline-flex items-center gap-1.5`}
         >
           {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-          {loading ? 'Checking offers...' : 'Suggest 5–10 Items'}
+          {loading ? 'Finding restocks...' : 'Suggest 5–10 Items'}
         </button>
       </div>
 
-      <p className="text-[11px] text-gray-500">On request, purchase-frequency summaries and active grocery names are sent to Google Gemini. Verify offers with the store; prices and availability may vary.</p>
+      <p className="text-[11px] text-gray-500">On request, purchase-frequency summaries and active grocery names are sent to Google Gemini. No live offers, prices or availability are checked. Store labels are suggested shopping-list destinations only.</p>
       <ErrorNotice message={error} />
 
       {suggestions.length > 0 && (
@@ -1178,9 +1169,6 @@ function GroceryAiAdvisor({ groceryHistory, activeGroceryItems, onAddItem }) {
                   </div>
                   {item.habitReason && (
                     <p className="text-[11px] font-semibold text-gray-600 mt-0.5">📊 {item.habitReason}</p>
-                  )}
-                  {item.dealReason && (
-                    <p className="text-[11px] font-semibold text-emerald-700">🏷️ {item.dealReason}</p>
                   )}
                 </div>
                 <button
@@ -1200,17 +1188,6 @@ function GroceryAiAdvisor({ groceryHistory, activeGroceryItems, onAddItem }) {
           })}
         </div>
       )}
-      {sources.length > 0 && <div className="border-t pt-2 text-xs space-y-1">
-        <p className="font-bold">Search sources — check offers before shopping</p>
-        <ul className="list-disc pl-4 space-y-1">{sources.map((source, index) => <li key={`${source.url}-${index}`}><a href={source.url} target="_blank" rel="noopener noreferrer" className="text-fuchsia-700 underline break-words">{source.title || 'View source'}</a></li>)}</ul>
-      </div>}
-      {searchEntryPoint && <iframe
-        title="Google Search suggestions"
-        sandbox="allow-popups allow-popups-to-escape-sandbox"
-        referrerPolicy="no-referrer"
-        className="w-full h-40 border-0"
-        srcDoc={`<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; base-uri 'none'; form-action 'none';"><base target="_blank"></head><body>${searchEntryPoint}</body></html>`}
-      />}
     </section>
   );
 }
